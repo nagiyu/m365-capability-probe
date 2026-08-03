@@ -115,7 +115,7 @@ Both subcommands print a table and write the same content to `reports/<command>-
 ### `auth`
 
 Requests a token for three audiences in two modes and reports all six outcomes. No token is used to
-call anything; this subcommand only measures which doors the app may knock on.
+call anything; this subcommand only measures what the app holds.
 
 | audience | scope |
 | --- | --- |
@@ -130,13 +130,31 @@ With the setup above, the expected shape is:
 
 | audience | app-only | delegated |
 | --- | --- | --- |
-| Graph | token issued | token issued |
-| SharePoint | token issued | **refused** — no delegated grant |
-| Azure RMS | **refused** | **refused** — nothing granted |
+| Graph | holds `Sites.Read.All` | holds `Sites.Read.All` |
+| SharePoint | holds `Sites.Read.All` | **holds nothing** — no delegated grant |
+| Azure RMS | **holds nothing** | **holds nothing** — nothing granted |
 
-A cell that lands somewhere else is marked `[!]`. Refused cells carry the error code verbatim,
-because the code is the only thing that separates *"this app was not granted that"* from *"that
-resource does not exist in this tenant"* — both of which look identical as a failed token request.
+A cell that lands somewhere else is marked `[!]`.
+
+**A token being issued is not the same as the app being able to do anything.** Entra hands out tokens
+for resources an app was granted nothing for — client credentials against a resource with no assigned
+app roles still succeeds, as long as that resource's service principal exists in the tenant — and the
+token comes back carrying no roles and no scopes. It is a valid token that every call refuses. Judging
+by issuance alone would report such an app as reaching a resource it cannot touch, which is precisely
+the mistake this tool exists to prevent.
+
+So each cell reports both halves: whether a token came back, and what it carries. The report reads the
+`roles` and `scp` claims out of the token's payload and prints them. Those claims are **read, not
+verified**: this tool is not the audience of any of these tokens and makes no trust decision based on
+them, so a signature check would answer a question nobody here is asking. No token-handling library is
+pulled in for it.
+
+Refused cells carry the error code verbatim, because the code is the only thing that separates *"this
+app was not granted that"* from *"that resource does not exist in this tenant"* — both of which look
+identical as a failed token request.
+
+Timings say `cached` when the credential answered from its own in-memory cache rather than asking the
+issuer, so a cache hit is not misread as a very fast network round trip.
 
 Delegated sign-in is a device code flow. The code, the sign-in URL and the configured
 `DelegatedUserHint` are all printed before the prompt; signing in with an administrator account
@@ -192,7 +210,7 @@ src/CapabilityProbe.Cli/
   appsettings.json    key names, empty values
   Configuration/      ProbeOptions, ProbeOptionsLoader
   Auth/               ProbeMode, ProbeAudience, ScopeResolver, ITokenSource,
-                      AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode
+                      AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
   Http/               ProbeHttpClient — returns status and body, never throws on a response
   Probes/             AuthProbe, AccessProbe
   Reporting/          Verdict, Observation, ProbeReport, ConsoleReportWriter, JsonReportWriter

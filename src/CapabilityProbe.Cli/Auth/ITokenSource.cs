@@ -16,9 +16,36 @@ public sealed record TokenResult(
 {
     public string? AccessToken { get; init; }
 
+    /// <summary>What the issued token carries. Null when there is no token, or none that could be read.</summary>
+    public TokenClaims? Claims { get; init; }
+
+    /// <summary>
+    /// True when the credential answered from its in-memory cache instead of asking the issuer.
+    /// Without this a cached hit reads as a network request that took no time at all.
+    /// </summary>
+    public bool ServedFromCache { get; init; }
+
+    /// <summary>
+    /// True when the app can actually use this token. A token with neither roles nor scopes is issued,
+    /// valid, and refused by every call made with it. An unreadable token falls back to its issuance,
+    /// and the report says the claims could not be read rather than implying an empty grant.
+    /// </summary>
+    public bool CarriesPermission => Succeeded && (Claims is null || Claims.CarriesPermission);
+
     public static TokenResult Success(
-        ProbeMode mode, ProbeAudience audience, string scope, string token, DateTimeOffset expiresOn, long elapsedMs) =>
-        new(mode, audience, scope, true, null, null, expiresOn, elapsedMs) { AccessToken = token };
+        ProbeMode mode,
+        ProbeAudience audience,
+        string scope,
+        string token,
+        DateTimeOffset expiresOn,
+        long elapsedMs,
+        bool servedFromCache = false) =>
+        new(mode, audience, scope, true, null, null, expiresOn, elapsedMs)
+        {
+            AccessToken = token,
+            Claims = TokenClaimsReader.Read(token),
+            ServedFromCache = servedFromCache,
+        };
 
     public static TokenResult Failure(
         ProbeMode mode, ProbeAudience audience, string scope, string errorCode, string errorDetail, long elapsedMs) =>

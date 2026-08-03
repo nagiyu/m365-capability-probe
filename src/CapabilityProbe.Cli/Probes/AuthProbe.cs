@@ -18,10 +18,16 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         [ProbeMode.AppOnly, ProbeMode.Delegated];
 
     /// <summary>
-    /// What the tenant described in the README should produce. A cell that lands somewhere else is
-    /// the finding - either the grants are not what they were believed to be, or the tenant is not.
+    /// Whether the app is expected to hold a usable permission for this pair, given the grants the
+    /// README asks for. A cell that lands somewhere else is the finding - either the grants are not
+    /// what they were believed to be, or the tenant is not.
+    /// <para>
+    /// This is deliberately not "is a token issued". Entra hands out tokens for resources an app was
+    /// granted nothing for, and those tokens carry no roles and no scopes. Judging by issuance alone
+    /// would report such an app as reaching a resource it cannot touch.
+    /// </para>
     /// </summary>
-    private static bool ExpectsToken(ProbeAudience audience, ProbeMode mode) => (audience, mode) switch
+    private static bool ExpectsPermission(ProbeAudience audience, ProbeMode mode) => (audience, mode) switch
     {
         (ProbeAudience.Graph, _) => true,
 
@@ -100,7 +106,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             .ToList();
 
         return new ProbeTable(
-            "Token acquisition (cell shows what happened; [!] marks a cell that missed its expectation)",
+            "What the app holds ([!] marks a cell that missed its expectation)",
             ["audience", "scope", "app-only", "delegated"],
             rows);
     }
@@ -112,8 +118,20 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             return "NotRun";
         }
 
-        var text = result.Succeeded ? "token issued" : $"refused: {result.ErrorCode}";
-        return result.Succeeded == ExpectsToken(audience, mode) ? text : $"[!] {text}";
+        var text = result switch
+        {
+            { Succeeded: false } => $"refused: {result.ErrorCode}",
+            { Claims: null } => "token, claims unreadable",
+            { Claims.CarriesPermission: false } => "token, but nothing granted",
+            _ => $"token, {result.Claims.GrantSummary()}",
+        };
+
+        if (result.ServedFromCache)
+        {
+            text += " (cached)";
+        }
+
+        return result.CarriesPermission == ExpectsPermission(audience, mode) ? text : $"[!] {text}";
     }
 
     private static ProbeTable BuildDetail(IReadOnlyDictionary<(ProbeAudience, ProbeMode), TokenResult?> results)
@@ -129,48 +147,63 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                 {
                     audience.Display(),
                     mode.Display(),
-                    ExpectsToken(audience, mode) ? "token" : "refusal",
-                    result is null ? "NotRun" : result.Succeeded ? "token" : "refusal",
+                    ExpectsPermission(audience, mode) ? "permission" : "none",
+                    result is null ? "NotRun" : result.Succeeded ? "issued" : "refused",
+                    result?.Claims?.GrantSummary() ?? (result?.Succeeded == true ? "(claims unreadable)" : ""),
+                    result?.Claims?.Audience ?? "",
                     result?.ErrorCode ?? "",
-                    result is null ? "" : result.ElapsedMs.ToString(),
+                    result is null ? "" : result.ServedFromCache ? "cached" : result.ElapsedMs.ToString(),
                     result?.ErrorDetail ?? "",
                 });
             }
         }
 
         return new ProbeTable(
-            "Token requests in detail",
-            ["audience", "mode", "expected", "observed", "error code", "ms", "error detail"],
+            "Token requests in detail (token claims are read, not verified - this tool is not their audience)",
+            ["audience", "mode", "expected", "token", "granted", "aud claim", "error code", "ms", "error detail"],
             rows);
     }
 
     private static Observation BuildObservation(ProbeAudience audience, ProbeMode mode, TokenResult? result)
     {
-        var expectsToken = ExpectsToken(audience, mode);
-        var claim = expectsToken
-            ? $"{audience.Display()} / {mode.Display()}: a token can be acquired"
-            : $"{audience.Display()} / {mode.Display()}: the token request is refused";
+        var expectsPermission = ExpectsPermission(audience, mode);
+        var claim = expectsPermission
+            ? $"{audience.Display()} / {mode.Display()}: the app holds a usable permission"
+            : $"{audience.Display()} / {mode.Display()}: the app holds no usable permission";
 
         if (result is null)
         {
             return Observation.NotRun(claim, "the delegated sign-in did not complete, so this audience was never requested");
         }
 
-        var observed = result.Succeeded
-            ? $"token issued, expires {result.ExpiresOn:u} ({result.ElapsedMs} ms)"
-            : $"refused with {result.ErrorCode} ({result.ElapsedMs} ms)";
+        var timing = result.ServedFromCache ? "from the credential's cache" : $"{result.ElapsedMs} ms";
 
-        return new Observation(claim, observed, result.Succeeded == expectsToken ? Verdict.Ok : Verdict.Failed)
+        var observed = result switch
+        {
+            { Succeeded: false } => $"token refused with {result.ErrorCode} ({timing})",
+            { Claims: null } => $"token issued, but its claims could not be read ({timing})",
+            { Claims.CarriesPermission: false } =>
+                $"token issued carrying no roles and no scopes - nothing can be called with it ({timing})",
+            _ => $"token issued carrying {result.Claims.GrantSummary()} ({timing})",
+        };
+
+        return new Observation(claim, observed, result.CarriesPermission == expectsPermission ? Verdict.Ok : Verdict.Failed)
         {
             Details = new Dictionary<string, string?>
             {
                 ["audience"] = audience.Display(),
                 ["mode"] = mode.Display(),
                 ["scope"] = result.Scope,
-                ["expectedToken"] = expectsToken ? "true" : "false",
+                ["expectedPermission"] = expectsPermission ? "true" : "false",
                 ["tokenIssued"] = result.Succeeded ? "true" : "false",
+                ["carriesPermission"] = result.CarriesPermission ? "true" : "false",
+                ["audClaim"] = result.Claims?.Audience,
+                ["roles"] = result.Claims is null ? null : string.Join(' ', result.Claims.Roles),
+                ["scp"] = result.Claims is null ? null : string.Join(' ', result.Claims.Scopes),
+                ["signedInAs"] = result.Claims?.SignedInAs,
                 ["errorCode"] = result.ErrorCode,
                 ["errorDetail"] = result.ErrorDetail,
+                ["servedFromCache"] = result.ServedFromCache ? "true" : "false",
                 ["elapsedMs"] = result.ElapsedMs.ToString(),
             },
         };

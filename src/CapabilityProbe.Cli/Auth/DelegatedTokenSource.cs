@@ -20,6 +20,7 @@ public sealed class DelegatedTokenSource : ITokenSource
     private readonly ProbeOptions _options;
     private readonly DeviceCodeCredential _credential;
     private readonly TextWriter _console;
+    private readonly HashSet<string> _alreadyAcquired = new(StringComparer.OrdinalIgnoreCase);
 
     public DelegatedTokenSource(ProbeOptions options, TextWriter console)
     {
@@ -61,6 +62,7 @@ public sealed class DelegatedTokenSource : ITokenSource
             stopwatch.Stop();
 
             IsSignedIn = true;
+            _alreadyAcquired.Add(scope);
             _console.WriteLine($"Signed in as: {record.Username}");
             if (!string.Equals(record.Username, _options.DelegatedUserHint, StringComparison.OrdinalIgnoreCase))
             {
@@ -93,12 +95,15 @@ public sealed class DelegatedTokenSource : ITokenSource
             }
         }
 
+        var servedFromCache = _alreadyAcquired.Contains(scope);
         var stopwatch = Stopwatch.StartNew();
         try
         {
             var token = await _credential.GetTokenAsync(new TokenRequestContext([scope]), cancellationToken);
             stopwatch.Stop();
-            return TokenResult.Success(Mode, audience, scope, token.Token, token.ExpiresOn, stopwatch.ElapsedMilliseconds);
+            _alreadyAcquired.Add(scope);
+            return TokenResult.Success(
+                Mode, audience, scope, token.Token, token.ExpiresOn, stopwatch.ElapsedMilliseconds, servedFromCache);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -13,6 +13,7 @@ public sealed class AppOnlyTokenSource : ITokenSource
 {
     private readonly ProbeOptions _options;
     private readonly ClientSecretCredential _credential;
+    private readonly HashSet<string> _alreadyAcquired = new(StringComparer.OrdinalIgnoreCase);
 
     public AppOnlyTokenSource(ProbeOptions options)
     {
@@ -25,13 +26,16 @@ public sealed class AppOnlyTokenSource : ITokenSource
     public async Task<TokenResult> GetTokenAsync(ProbeAudience audience, CancellationToken cancellationToken)
     {
         var scope = ScopeResolver.Resolve(audience, _options);
+        var servedFromCache = _alreadyAcquired.Contains(scope);
         var stopwatch = Stopwatch.StartNew();
 
         try
         {
             var token = await _credential.GetTokenAsync(new TokenRequestContext([scope]), cancellationToken);
             stopwatch.Stop();
-            return TokenResult.Success(Mode, audience, scope, token.Token, token.ExpiresOn, stopwatch.ElapsedMilliseconds);
+            _alreadyAcquired.Add(scope);
+            return TokenResult.Success(
+                Mode, audience, scope, token.Token, token.ExpiresOn, stopwatch.ElapsedMilliseconds, servedFromCache);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
