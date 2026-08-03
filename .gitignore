@@ -427,3 +427,20 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+##
+## capability-probe
+##
+
+# Build output
+bin/
+obj/
+.vs/
+
+# Local settings and secrets. Real values belong in user-secrets or the environment,
+# never in a tracked file.
+appsettings.local.json
+*.pfx
+
+# Probe output
+reports/
