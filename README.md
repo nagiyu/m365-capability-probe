@@ -1,0 +1,1 @@
+# m365-capability-probe
