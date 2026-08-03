@@ -1,3 +1,4 @@
+using System.Text;
 using CapabilityProbe.Configuration;
 using CapabilityProbe.Http;
 using CapabilityProbe.Probes;
@@ -10,6 +11,8 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        UseUtf8Console();
+
         var command = args.Length > 0 && !args[0].StartsWith('-') ? args[0].ToLowerInvariant() : null;
         var configArgs = args.Length > 0 ? args[1..] : [];
 
@@ -69,6 +72,23 @@ public static class Program
     {
         using var http = new ProbeHttpClient();
         return await new AccessProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
+    /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
+    /// Written without a byte order mark so redirected output stays a clean stream.
+    /// </summary>
+    private static void UseUtf8Console()
+    {
+        try
+        {
+            Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        }
+        catch (IOException)
+        {
+            // No console attached. Nothing to configure, and nothing worth failing a run over.
+        }
     }
 
     private static void WriteUsage(TextWriter writer)
