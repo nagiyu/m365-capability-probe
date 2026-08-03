@@ -1,0 +1,107 @@
+# Runs the probe from a dispatch instead of from a debugger.
+#
+# The delegated leg is a device code flow, and device code needs a person. This workflow does not
+# pretend otherwise: it prints the code into the job log and waits for someone to complete the
+# sign-in in a browser. Nothing here is unattended, and a run nobody is watching will spend the
+# code's lifetime waiting and then report the delegated column as refused.
+name: capability probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      subcommand:
+        description: "What to measure"
+        type: choice
+        options: [auth, access]
+        default: auth
+        required: true
+      site_url:
+        description: "SiteUrl - https://<host>/sites/<name>"
+        type: string
+        required: true
+      delegated_user_hint:
+        description: "DelegatedUserHint - the sign-in name the delegated leg should be completed with"
+        type: string
+        required: true
+      file_path:
+        description: "FilePath - access only. No library name. e.g. /test.docx"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# The run parks on a device code prompt. Two of those in flight at once means two codes in two
+# logs and no way to tell which one the browser is about to consume.
+concurrency:
+  group: capability-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+
+    # The device code itself expires in about 15 minutes. This bounds the whole job a little past
+    # that, so a run nobody attended ends on its own rather than holding a runner.
+    timeout-minutes: 25
+
+    env:
+      DOTNET_NOLOGO: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Restore and build before the probe step, not inside it. The person completing the sign-in
+      # gets the code's full lifetime to do it, rather than losing the first minute of it to NuGet.
+      - name: Build
+        run: dotnet build M365CapabilityProbe.sln -c Release
+
+      - name: Say what to watch for
+        run: |
+          echo "The next step requests app-only tokens first, then stops and prints a device code."
+          echo "Open the URL it prints, enter the code, and sign in as: ${{ inputs.delegated_user_hint }}"
+          echo "Signing in as anyone else measures that person's reach instead - the report says so if you do."
+
+      - name: Probe
+        # The delegated sign-in is the long pole. Bounded here so a timeout is attributed to the
+        # wait for a person and not to the job as a whole.
+        timeout-minutes: 20
+        env:
+          # Only the three values that never change per run are secrets. SiteUrl, FilePath and
+          # DelegatedUserHint are what a given run is about, so they are dispatch inputs.
+          PROBE_TENANTID: ${{ secrets.PROBE_TENANTID }}
+          PROBE_CLIENTID: ${{ secrets.PROBE_CLIENTID }}
+          PROBE_CLIENTSECRET: ${{ secrets.PROBE_CLIENTSECRET }}
+          PROBE_SITEURL: ${{ inputs.site_url }}
+          PROBE_FILEPATH: ${{ inputs.file_path }}
+          PROBE_DELEGATEDUSERHINT: ${{ inputs.delegated_user_hint }}
+          # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
+          SUBCOMMAND: ${{ inputs.subcommand }}
+        run: |
+          set -u
+          status=0
+          dotnet run --project src/CapabilityProbe.Cli -c Release --no-build -- "$SUBCOMMAND" || status=$?
+
+          echo
+          case "$status" in
+            0)   echo "exit 0   - every claim held" ;;
+            1)   echo "exit 1   - a claim was contradicted; read the [!] cells above" ;;
+            2)   echo "exit 2   - something never ran; the delegated sign-in most likely went uncompleted" ;;
+            64)  echo "exit 64  - bad usage" ;;
+            78)  echo "exit 78  - configuration is incomplete; the missing keys are listed above" ;;
+            130) echo "exit 130 - cancelled" ;;
+            *)   echo "exit $status" ;;
+          esac
+
+          echo
+          echo "A refusal seen here and not seen locally is not automatically a permission finding:"
+          echo "this ran from a GitHub-hosted runner, so the source IP and device differ from your"
+          echo "machine, and a conditional access policy can refuse on those grounds alone."
+
+          exit $status
