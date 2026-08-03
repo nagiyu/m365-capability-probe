@@ -321,9 +321,19 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         var claim = $"{run.Mode.Display()}: a Graph token can be acquired for the file read";
         if (run.Token.Succeeded)
         {
-            return new Observation(claim, $"token issued ({run.Token.ElapsedMs} ms)", Verdict.Ok)
+            // The delegated token is the device code sign-in, so most of its elapsed time is a person
+            // reading a screen. Reporting it next to service timings without saying so invites the
+            // reading that Entra took a minute and a half to answer.
+            var timing = run.Mode == ProbeMode.Delegated
+                ? $"{run.Token.ElapsedMs} ms, including the wait for the person to sign in"
+                : $"{run.Token.ElapsedMs} ms";
+
+            return new Observation(claim, $"token issued ({timing})", Verdict.Ok)
             {
-                Details = Details(run, ("elapsedMs", run.Token.ElapsedMs.ToString())),
+                Details = Details(
+                    run,
+                    ("elapsedMs", run.Token.ElapsedMs.ToString()),
+                    ("elapsedIncludesSignIn", run.Mode == ProbeMode.Delegated ? "true" : "false")),
             };
         }
 
@@ -368,16 +378,21 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
     }
 
     /// <summary>
-    /// The delegated leg is claimed to be turned away: the signed-in person is a visitor on the site,
-    /// and reading an item's permission list is not something a visitor may do. A 403 here is the claim
-    /// holding, not a fault to be cleared by granting more.
+    /// The delegated leg is claimed not to learn who has access: the signed-in person is a visitor on
+    /// the site, and an item's permission entries are not a visitor's to see.
+    /// <para>
+    /// The claim is about what is revealed, not about the HTTP status, because Graph does not refuse
+    /// this call. It answers 200 with an empty collection - the entries are filtered to what the caller
+    /// may see, and a caller who may see none is told "success, nothing here". So a 403 and a 200 with
+    /// zero entries both satisfy the claim, and neither is a fault to be cleared by granting more.
+    /// </para>
     /// </summary>
     private static Observation PermissionsObservation(ModeRun run)
     {
         var expectsSuccess = run.Mode == ProbeMode.AppOnly;
         var claim = expectsSuccess
             ? $"{run.Mode.Display()}: the file's permission list is readable"
-            : $"{run.Mode.Display()}: the file's permission list is not readable";
+            : $"{run.Mode.Display()}: the permission list does not reveal the file's permission entries";
 
         if (run.Permissions is null)
         {
@@ -389,7 +404,16 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
               (run.PrincipalKinds.Count == 0 ? "none" : string.Join(", ", run.PrincipalKinds))
             : $"{run.Permissions.StatusText} {ErrorCodeOf(run.Permissions)}".Trim();
 
-        return new Observation(claim, observed, run.Permissions.IsSuccess == expectsSuccess ? Verdict.Ok : Verdict.Failed)
+        if (!expectsSuccess && run.Permissions.IsSuccess && run.PermissionEntryCount == 0)
+        {
+            observed += " - Graph answered success with an empty list rather than refusing";
+        }
+
+        var held = expectsSuccess
+            ? run.Permissions.IsSuccess
+            : !run.Permissions.IsSuccess || run.PermissionEntryCount is null or 0;
+
+        return new Observation(claim, observed, held ? Verdict.Ok : Verdict.Failed)
         {
             Details = Details(
                 run,
@@ -417,11 +441,19 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         var differs = appStatus != delegatedStatus ||
                       appOnly.PermissionEntryCount != delegatedRun.PermissionEntryCount;
 
-        return new Observation(
-            Claim,
+        var observed =
             $"app-only {appStatus} / entries {appOnly.PermissionEntryCount?.ToString() ?? "-"}; " +
-            $"delegated {delegatedStatus} / entries {delegatedRun.PermissionEntryCount?.ToString() ?? "-"}",
-            differs ? Verdict.Ok : Verdict.Failed)
+            $"delegated {delegatedStatus} / entries {delegatedRun.PermissionEntryCount?.ToString() ?? "-"}";
+
+        // Same status, different contents. Worth saying out loud: a caller seeing only the delegated
+        // half has no way to tell this file's sharing from a file that is not shared with anyone.
+        if (appStatus == delegatedStatus &&
+            appOnly.PermissionEntryCount != delegatedRun.PermissionEntryCount)
+        {
+            observed += " - identical status, different contents: the status alone cannot tell a filtered list from an empty one";
+        }
+
+        return new Observation(Claim, observed, differs ? Verdict.Ok : Verdict.Failed)
         {
             Details = new Dictionary<string, string?>
             {

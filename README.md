@@ -197,9 +197,27 @@ kinds of principal that appeared in them (`user`, `group`, `siteGroup`, `applica
 the elapsed milliseconds. The full list of calls — URL, status, timing, Graph error code — is
 printed as its own table.
 
-With a delegated user who is only a *visitor* on the site, the delegated leg is expected to resolve
-the site and the file and then be turned away from the permission list. That refusal is the point of
-the subcommand.
+With a delegated user who is only a *visitor* on the site, both legs resolve the site and the file.
+The difference shows up in the last call, and it does not show up as a refusal:
+
+```
+| mode      | site   | item   | permissions | entries | principal kinds                            |
+| app-only  | 200 OK | 200 OK | 200 OK      | 4       | sharePointGroup, siteGroup, siteUser, user |
+| delegated | 200 OK | 200 OK | 200 OK      | 0       | -                                          |
+```
+
+**Graph does not refuse the delegated caller. It answers `200 OK` with an empty collection.** The
+permission entries are filtered to what the caller may see, and a caller who may see none is told
+"success, nothing here" — for the same item, at the same moment, that the app-only leg sees four
+entries for.
+
+That is worth more than a `403` would have been, because it is the harder mistake to catch: nothing in
+the status code separates *"this file is shared with nobody"* from *"this file's sharing is not yours
+to see"*. Code that reads the delegated answer alone and concludes the file is unshared gets the
+opposite of the truth. Running both legs together, in one execution, is what makes the gap visible.
+
+The delegated token's elapsed time includes the wait for a person to complete the device code sign-in,
+and the report says so rather than presenting a minute and a half as service latency.
 
 ## Reading the output
 
