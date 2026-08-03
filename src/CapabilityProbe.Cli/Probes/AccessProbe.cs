@@ -143,7 +143,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         };
     }
 
-    /// <summary>Escapes each segment but keeps the separators, so '/Shared Documents/x.docx' stays a path.</summary>
+    /// <summary>Escapes each segment but keeps the separators, so '/my drafts/q3.docx' stays a path.</summary>
     private static string EscapePath(string path) =>
         string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
 

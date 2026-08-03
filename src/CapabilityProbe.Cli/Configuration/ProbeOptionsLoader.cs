@@ -61,7 +61,7 @@ public static class ProbeOptionsLoader
         Require(problems, "DelegatedUserHint", options.DelegatedUserHint, BothCommands,
             "sign-in name to use for the device code leg, shown on screen before sign-in");
         Require(problems, "FilePath", options.FilePath, AccessOnly,
-            "library-relative path, e.g. /Shared Documents/test.docx");
+            "path inside the site's default document library, without the library's own name, e.g. /test.docx");
 
         if (!string.IsNullOrWhiteSpace(options.SiteUrl))
         {
@@ -80,7 +80,7 @@ public static class ProbeOptionsLoader
         {
             problems.Add(new ConfigurationProblem(
                 "FilePath",
-                $"must start with '/': '{options.FilePath}' (expected e.g. /Shared Documents/test.docx)",
+                $"must start with '/': '{options.FilePath}' (expected e.g. /test.docx)",
                 AccessOnly));
         }
 

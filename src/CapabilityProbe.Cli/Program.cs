@@ -104,9 +104,12 @@ public static class Program
         writer.WriteLine();
         writer.WriteLine("  TenantId ClientId ClientSecret SiteUrl FilePath DelegatedUserHint");
         writer.WriteLine();
+        writer.WriteLine("FilePath is relative to the root of the site's default document library and does not");
+        writer.WriteLine("include the library's own name: a file sitting directly in it is just /test.docx.");
+        writer.WriteLine();
         writer.WriteLine("Example:");
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- auth");
-        writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- access --FilePath=\"/Shared Documents/test.docx\"");
+        writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- access --FilePath=\"/drafts/q3.docx\"");
         writer.WriteLine();
         writer.WriteLine("Exit codes: 0 every claim held, 1 a claim was contradicted, 2 something never ran,");
         writer.WriteLine("            64 bad usage, 78 incomplete configuration, 130 cancelled.");

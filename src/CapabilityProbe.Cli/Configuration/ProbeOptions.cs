@@ -18,7 +18,12 @@ public sealed class ProbeOptions
     /// <summary>Site collection URL in the form <c>https://&lt;host&gt;/sites/&lt;name&gt;</c>.</summary>
     public string SiteUrl { get; set; } = string.Empty;
 
-    /// <summary>Library-relative path of the file to read, e.g. <c>/Shared Documents/test.docx</c>.</summary>
+    /// <summary>
+    /// Path of the file to read, relative to the root of the site's default document library and not
+    /// including the library's own name - a file sitting directly in that library is just
+    /// <c>/test.docx</c>. This is the path the probe appends to <c>/drive/root:</c>, and prefixing it
+    /// with the library name looks for a folder of that name inside the library instead.
+    /// </summary>
     public string FilePath { get; set; } = string.Empty;
 
     /// <summary>Sign-in name the operator should use for the delegated (device code) leg.</summary>

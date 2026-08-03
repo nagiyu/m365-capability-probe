@@ -17,6 +17,10 @@ Everything goes through `HttpClient` directly. No Graph SDK: the value of this t
 can see which URL was called with which headers and re-issue it by hand, which an SDK hides. It also
 keeps one code path for Graph and for any SharePoint REST call added later.
 
+Running it against a real tenant contradicted three reasonable predictions made from the app's API
+permissions screen. Those are written up in **[docs/findings.md](docs/findings.md)**, and they are the
+shortest argument for why a tool like this is worth having.
+
 ## What it is not
 
 It does not decrypt protected files, walk a whole site, measure throughput, or track deltas. It does
@@ -58,8 +62,17 @@ Six keys:
 | `ClientId` | Application (client) ID |
 | `ClientSecret` | Client secret |
 | `SiteUrl` | `https://<host>/sites/<name>` |
-| `FilePath` | Library-relative path, e.g. `/Shared Documents/test.docx` |
+| `FilePath` | Path inside the site's default document library, e.g. `/test.docx` |
 | `DelegatedUserHint` | Sign-in name to use for the delegated leg |
+
+**`FilePath` does not include the library's own name.** It is appended to `/drive/root:`, which is
+already the root of the site's default document library, so a file sitting directly in that library is
+just `/test.docx` — not `/Shared Documents/test.docx`. Prefixing it with the library name looks for a
+folder of that name *inside* the library and comes back `404`. Subfolders do belong in the path:
+`/drafts/q3.docx`.
+
+The other five keys are read verbatim; only `SiteUrl` is decomposed, into the host name (which becomes
+the SharePoint scope) and the server-relative path (which resolves the site).
 
 They are read from five layers, and **a later layer wins**:
 
@@ -78,7 +91,7 @@ dotnet user-secrets set "TenantId"          "<tenant guid>"
 dotnet user-secrets set "ClientId"          "<client guid>"
 dotnet user-secrets set "ClientSecret"      "<secret value>"
 dotnet user-secrets set "SiteUrl"           "https://contoso.sharepoint.com/sites/probe"
-dotnet user-secrets set "FilePath"          "/Shared Documents/test.docx"
+dotnet user-secrets set "FilePath"          "/test.docx"
 dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
 ```
 
@@ -89,7 +102,7 @@ together with the subcommand each one blocks, and the run stops — no exception
 Missing or invalid keys:
   ClientSecret       missing - client secret; keep it in user-secrets, not in a committed file
                      blocks: auth, access
-  FilePath           missing - library-relative path, e.g. /Shared Documents/test.docx
+  FilePath           missing - path inside the site's default document library, without the library's own name, e.g. /test.docx
                      blocks: access
 
 Subcommand readiness:
@@ -107,7 +120,7 @@ dotnet run --project src/CapabilityProbe.Cli -- access
 Any key can be overridden per run:
 
 ```bash
-dotnet run --project src/CapabilityProbe.Cli -- access --FilePath="/Shared Documents/other.docx"
+dotnet run --project src/CapabilityProbe.Cli -- access --FilePath="/drafts/q3.docx"
 ```
 
 Both subcommands print a table and write the same content to `reports/<command>-<timestamp>.json`.
