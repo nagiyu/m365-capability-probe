@@ -131,10 +131,26 @@ With the setup above, the expected shape is:
 | audience | app-only | delegated |
 | --- | --- | --- |
 | Graph | holds `Sites.Read.All` | holds `Sites.Read.All` |
-| SharePoint | holds `Sites.Read.All` | **holds nothing** — no delegated grant |
+| SharePoint | holds `Sites.Read.All` | holds `Sites.Read.All` — **see below** |
 | Azure RMS | **holds nothing** | **holds nothing** — nothing granted |
 
 A cell that lands somewhere else is marked `[!]`.
+
+Two of those cells are worth dwelling on, because neither is what the permissions blade predicts.
+
+**SharePoint / delegated holds a permission that was never granted to it.** The app registration has
+no SharePoint *delegated* permission at all — only the application one. Yet the delegated leg comes
+back with a token whose `aud` is `00000003-0000-0ff1-ce00-000000000000` (SharePoint Online) carrying
+`scp: Sites.Read.All User.Read` — an exact mirror of the app's *Microsoft Graph* delegated grants.
+Consenting to Graph's `Sites.Read.All` reaches SharePoint as well. Nothing on the API permissions
+screen says so; it only shows up by taking a token and looking inside it.
+
+**Azure RMS / app-only is issued a token that can do nothing.** No RMS permission is granted in either
+direction. The delegated leg is refused outright with `AADSTS65001`, but the app-only leg succeeds —
+and returns a token with no `roles` and no `scp`. The two legs disagree because `.default` means
+different things to each: for a signed-in person it means "every scope already consented", and zero
+consented scopes is an error; for client credentials it means "every app role assigned", and zero
+assigned roles is simply an empty token.
 
 **A token being issued is not the same as the app being able to do anything.** Entra hands out tokens
 for resources an app was granted nothing for — client credentials against a resource with no assigned

@@ -31,11 +31,19 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
     {
         (ProbeAudience.Graph, _) => true,
 
-        // Sites.Read.All is granted to the application, not to the delegated flow.
+        // SharePoint's own Sites.Read.All is granted to the application.
         (ProbeAudience.SharePoint, ProbeMode.AppOnly) => true,
-        (ProbeAudience.SharePoint, ProbeMode.Delegated) => false,
 
-        // No Azure RMS permission was granted at all, in either direction.
+        // And delegated holds one too, despite no SharePoint delegated permission being granted:
+        // the token comes back with the audience of SharePoint Online and an scp that mirrors the
+        // *Graph* delegated grants exactly. Consenting to Graph's Sites.Read.All reaches SharePoint.
+        // This one was measured, not predicted - the permissions blade shows nothing that explains it,
+        // and the first version of this table expected a refusal here. Removing the Graph delegated
+        // grant should flip this cell, which is the regression this line is worth keeping for.
+        (ProbeAudience.SharePoint, ProbeMode.Delegated) => true,
+
+        // No Azure RMS permission was granted at all, in either direction. App-only still gets a
+        // token - one with no roles in it, which is the distinction this whole subcommand turns on.
         (ProbeAudience.AzureRms, _) => false,
 
         _ => false,
