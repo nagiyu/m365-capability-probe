@@ -427,3 +427,24 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+##
+## capability-probe
+##
+
+# Build output
+bin/
+obj/
+.vs/
+
+# Local settings and secrets. Real values belong in user-secrets or the environment,
+# never in a tracked file.
+appsettings.local.json
+*.pfx
+
+# Visual Studio launch profiles. This is where an IDE run puts its command line arguments
+# and its environment variables, so it is exactly where a PROBE_ClientSecret would end up.
+**/Properties/launchSettings.json
+
+# Probe output
+reports/
