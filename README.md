@@ -1,102 +1,101 @@
 # m365-capability-probe
 
-A small command-line tool that takes one Entra app registration — tenant ID, client ID, client
-secret — and reports **what that app can actually reach in Microsoft 365**, rather than what its
-permission list appears to promise.
+Entra のアプリ登録 (テナント ID / クライアント ID / クライアント シークレット) を 1 つ受け取り、
+**そのアプリが Microsoft 365 に対して実際に何に届くか** を報告する小さなコマンドライン ツールです。
+アクセス許可の一覧が約束しているように見えるものではなく、実測を報告します。
 
-It answers two questions:
+答えるのは 2 つの問いです。
 
-1. **Does the app see the same thing as itself and as a person?** The same file is read twice in a
-   single run: once with an app-only token, once on behalf of a signed-in user. The two answers are
-   printed next to each other.
-2. **What exactly came back when it could not?** Refusals are recorded as measurements, with the
-   error code the identity provider or Graph actually returned. A `403` is a result here, not a bug
-   report.
+1. **アプリ自身として見えるものと、利用者として見えるものは同じか。** 同一のファイルを 1 回の実行で
+   2 回読みます ― 1 回はアプリ単独 (app-only) のトークンで、もう 1 回はサインインした利用者の代理
+   (delegated) で。2 つの答えを並べて出します。
+2. **届かなかったとき、正確に何が返ってきたか。** 拒否は測定値として記録します。ID プロバイダーや
+   Graph が実際に返したエラーコードつきで。ここでの `403` は結果であって、不具合の報告ではありません。
 
-Everything goes through `HttpClient` directly. No Graph SDK: the value of this tool is that a reader
-can see which URL was called with which headers and re-issue it by hand, which an SDK hides. It also
-keeps one code path for Graph and for any SharePoint REST call added later.
+すべて `HttpClient` を直接使っています。Graph SDK は使いません ― **どの URL にどのヘッダを付けて
+叩いたかが読めて、手で再現できること** がこのツールの価値であり、SDK はそれを隠すからです。あわせて、
+Graph と、あとから足すかもしれない SharePoint REST とを 1 つの経路で扱えます。
 
-Running it against a real tenant contradicted three reasonable predictions made from the app's API
-permissions screen. Those are written up in **[docs/findings.md](docs/findings.md)**, and they are the
-shortest argument for why a tool like this is worth having.
+実テナントに対して動かしたところ、**アプリの API アクセス許可画面から立てた妥当な予測が、3 つとも
+外れました。** その顛末は **[docs/findings.md](docs/findings.md)** にまとめてあります。この種の
+ツールを持つ理由の、一番短い説明になっています。
 
-## What it is not
+## やらないこと
 
-It does not decrypt protected files, walk a whole site, measure throughput, or track deltas. It does
-not try to make failing calls succeed. Several of the things it measures are *expected* to fail, and
-a run where they start succeeding is a finding in the other direction.
+保護されたファイルの復号、サイト全体の走査、スループットの測定、差分の追跡はしません。失敗する
+呼び出しを成功させようともしません。**測定対象のいくつかは失敗することが期待値** であり、それらが
+成功し始めた実行は、逆向きの所見です。
 
-## Requirements
+## 必要なもの
 
 - .NET 10 SDK
-- An Entra app registration in the tenant you want to look at
-- A SharePoint site with at least one file in a document library
-- A non-administrator account that can see that site, for the delegated leg
+- 調べたいテナントの Entra アプリ登録
+- ドキュメント ライブラリにファイルが 1 つ以上ある SharePoint サイト
+- そのサイトを見られる、管理者ではないアカウント (委任側で使います)
 
-## App registration setup
+## アプリ登録の設定
 
-Grant and admin-consent these API permissions:
+次の API アクセス許可を付与し、管理者の同意を与えてください。
 
-| API | Permission | Type |
+| API | アクセス許可 | 種類 |
 | --- | --- | --- |
-| Microsoft Graph | `Sites.Read.All` | Application |
-| Microsoft Graph | `Sites.Read.All` | Delegated |
-| SharePoint | `Sites.Read.All` | Application |
+| Microsoft Graph | `Sites.Read.All` | アプリケーション |
+| Microsoft Graph | `Sites.Read.All` | 委任 |
+| SharePoint | `Sites.Read.All` | アプリケーション |
 
-Deliberately **do not** grant anything for Azure Rights Management, and **do not** grant SharePoint
-`Sites.Read.All` as a *delegated* permission. Both gaps are what the `auth` subcommand measures;
-filling them in makes the tool report less, not more.
+**Azure Rights Management には意図的に何も付与しないでください。** また、SharePoint の
+`Sites.Read.All` を **委任** として付与しないでください。この 2 つの欠落こそが `auth` サブコマンドの
+測定対象です。埋めてしまうと、このツールが報告できることは増えるのではなく減ります。
 
-Under **Authentication**, set *Allow public client flows* to **Yes**. The delegated leg uses the
-device code flow, which is a public-client flow and does not use the client secret at all — the
-secret is only used by the app-only leg.
+**認証** で「パブリック クライアント フローを許可する」を **はい** にしてください。委任側は
+デバイス コード フローを使います。これはパブリック クライアント フローなので、**クライアント
+シークレットは一切使いません** ― シークレットを使うのは app-only 側だけです。
 
-## Configuration
+## 設定
 
-Six keys:
+キーは 6 つです。
 
-| Key | Meaning |
+| キー | 内容 |
 | --- | --- |
-| `TenantId` | Directory (tenant) ID |
-| `ClientId` | Application (client) ID |
-| `ClientSecret` | Client secret |
+| `TenantId` | ディレクトリ (テナント) ID |
+| `ClientId` | アプリケーション (クライアント) ID |
+| `ClientSecret` | クライアント シークレット |
 | `SiteUrl` | `https://<host>/sites/<name>` |
-| `FilePath` | Path inside the site's default document library, e.g. `/test.docx` |
-| `DelegatedUserHint` | Sign-in name to use for the delegated leg |
+| `FilePath` | サイトの既定のドキュメント ライブラリ内のパス。例 `/test.docx` |
+| `DelegatedUserHint` | 委任側で使う利用者のサインイン名 |
 
-**`FilePath` does not include the library's own name.** It is appended to `/drive/root:`, which is
-already the root of the site's default document library, so a file sitting directly in that library is
-just `/test.docx` — not `/Shared Documents/test.docx`. Prefixing it with the library name looks for a
-folder of that name *inside* the library and comes back `404`. Subfolders do belong in the path:
-`/drafts/q3.docx`.
+**`FilePath` にライブラリ名自体は含めません。** この値は `/drive/root:` に付け足されますが、そこは
+すでにサイトの既定のドキュメント ライブラリのルートです。したがってライブラリ直下にあるファイルは
+`/Shared Documents/test.docx` ではなく、単に `/test.docx` です。ライブラリ名を頭に付けると、
+ライブラリの **中にある** 同名のフォルダを探しに行って `404` が返ります。サブフォルダはパスに
+含めます: `/drafts/q3.docx`。
 
-The other five keys are read verbatim; only `SiteUrl` is decomposed, into the host name (which becomes
-the SharePoint scope) and the server-relative path (which resolves the site).
+他の 5 つのキーはそのまま読まれます。分解されるのは `SiteUrl` だけで、ホスト名 (SharePoint の
+スコープになります) とサーバー相対パス (サイトを解決します) に分けられます。
 
-They are read from five layers, and **a later layer wins**:
+設定は 5 つの層から読まれ、**後の層が勝ちます**。
 
-1. `src/CapabilityProbe.Cli/appsettings.json` — committed, keys present, values empty. It exists to
-   document the schema, not to hold values.
-2. `appsettings.local.json` — git-ignored, next to `appsettings.json`.
-3. **user-secrets** — the intended home for `ClientSecret`.
-4. Environment variables prefixed `PROBE_`, e.g. `PROBE_ClientSecret`.
-5. Command line, e.g. `--ClientSecret=...`.
+1. `src/CapabilityProbe.Cli/appsettings.json` ― コミット済み。キーだけあって値は空。値を持つためでは
+   なく、スキーマを自己文書化するために存在します
+2. `appsettings.local.json` ― git 管理外。`appsettings.json` の隣に置きます
+3. **user-secrets** ― `ClientSecret` の置き場所として想定しているのはここです
+4. `PROBE_` 接頭辞つきの環境変数。例 `PROBE_ClientSecret`
+5. コマンドライン引数。例 `--ClientSecret=...`
 
-Recommended setup:
+推奨する設定手順:
 
 ```bash
 cd src/CapabilityProbe.Cli
-dotnet user-secrets set "TenantId"          "<tenant guid>"
-dotnet user-secrets set "ClientId"          "<client guid>"
-dotnet user-secrets set "ClientSecret"      "<secret value>"
+dotnet user-secrets set "TenantId"          "<テナントの GUID>"
+dotnet user-secrets set "ClientId"          "<クライアントの GUID>"
+dotnet user-secrets set "ClientSecret"      "<シークレットの値>"
 dotnet user-secrets set "SiteUrl"           "https://contoso.sharepoint.com/sites/probe"
 dotnet user-secrets set "FilePath"          "/test.docx"
 dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
 ```
 
-The tool validates configuration before it does anything else. Missing keys are listed by name,
-together with the subcommand each one blocks, and the run stops — no exception, no partial probe:
+このツールは何かをする前に設定を検証します。足りないキーは名前で、それが塞いでいるサブコマンドと
+ともに並べられ、実行はそこで終わります ― 例外も投げなければ、途中まで観測することもしません。
 
 ```
 Missing or invalid keys:
@@ -110,108 +109,110 @@ Subcommand readiness:
   access   needs FilePath
 ```
 
-## Running
+## 実行
 
 ```bash
 dotnet run --project src/CapabilityProbe.Cli -- auth
 dotnet run --project src/CapabilityProbe.Cli -- access
 ```
 
-Any key can be overridden per run:
+任意のキーは実行ごとに上書きできます。
 
 ```bash
 dotnet run --project src/CapabilityProbe.Cli -- access --FilePath="/drafts/q3.docx"
 ```
 
-Both subcommands print a table and write the same content to `reports/<command>-<timestamp>.json`.
+どちらのサブコマンドも、表を出力すると同時に、同じ内容を
+`reports/<サブコマンド>-<タイムスタンプ>.json` に書きます。
 
 ### `auth`
 
-Requests a token for three audiences in two modes and reports all six outcomes. No token is used to
-call anything; this subcommand only measures what the app holds.
+3 つの audience に対して 2 つのモードでトークンを要求し、6 通りの結果を報告します。トークンは何の
+呼び出しにも使いません。このサブコマンドが測るのは **アプリが何を保持しているか** だけです。
 
-| audience | scope |
+| audience | スコープ |
 | --- | --- |
 | Graph | `https://graph.microsoft.com/.default` |
-| SharePoint | `https://<host of SiteUrl>/.default` |
+| SharePoint | `https://<SiteUrl のホスト名>/.default` |
 | Azure RMS | `https://aadrm.com/.default` |
 
-The SharePoint scope is built from the host name in `SiteUrl`, so the tool carries no built-in
-tenant list.
+SharePoint のスコープは `SiteUrl` のホスト名から組み立てます。このツールはテナントの一覧を内部に
+持ちません。
 
-With the setup above, the expected shape is:
+上記の設定であれば、期待される形はこうなります。
 
 | audience | app-only | delegated |
 | --- | --- | --- |
-| Graph | holds `Sites.Read.All` | holds `Sites.Read.All` |
-| SharePoint | holds `Sites.Read.All` | holds `Sites.Read.All` — **see below** |
-| Azure RMS | **holds nothing** | **holds nothing** — nothing granted |
+| Graph | `Sites.Read.All` を保持 | `Sites.Read.All` を保持 |
+| SharePoint | `Sites.Read.All` を保持 | `Sites.Read.All` を保持 ― **下記参照** |
+| Azure RMS | **何も保持しない** | **何も保持しない** ― 何も付与していない |
 
-A cell that lands somewhere else is marked `[!]`.
+そこから外れたセルには `[!]` が付きます。
 
-Two of those cells are worth dwelling on, because neither is what the permissions blade predicts.
+このうち 2 つのセルは立ち止まる価値があります。どちらも、アクセス許可の画面から予測されるものでは
+ありません。
 
-**SharePoint / delegated holds a permission that was never granted to it.** The app registration has
-no SharePoint *delegated* permission at all — only the application one. Yet the delegated leg comes
-back with a token whose `aud` is `00000003-0000-0ff1-ce00-000000000000` (SharePoint Online) carrying
-`scp: Sites.Read.All User.Read` — an exact mirror of the app's *Microsoft Graph* delegated grants.
-Consenting to Graph's `Sites.Read.All` reaches SharePoint as well. Nothing on the API permissions
-screen says so; it only shows up by taking a token and looking inside it.
+**SharePoint / delegated は、付与されていない権限を保持しています。** このアプリ登録に SharePoint の
+**委任** アクセス許可は 1 つもありません ― あるのはアプリケーションのものだけです。にもかかわらず
+委任側は、`aud` が `00000003-0000-0ff1-ce00-000000000000` (SharePoint Online) で
+`scp: Sites.Read.All User.Read` を持つトークンを受け取ります。これはこのアプリの **Microsoft Graph**
+の委任付与と完全に一致します。Graph の `Sites.Read.All` への同意が SharePoint にも届いています。
+API アクセス許可の画面にそう書いてある箇所はありません。トークンを取って中を見て初めて現れます。
 
-**Azure RMS / app-only is issued a token that can do nothing.** No RMS permission is granted in either
-direction. The delegated leg is refused outright with `AADSTS65001`, but the app-only leg succeeds —
-and returns a token with no `roles` and no `scp`. The two legs disagree because `.default` means
-different things to each: for a signed-in person it means "every scope already consented", and zero
-consented scopes is an error; for client credentials it means "every app role assigned", and zero
-assigned roles is simply an empty token.
+**Azure RMS / app-only は、何もできないトークンを発行されます。** RMS のアクセス許可は両方向とも
+付与していません。委任側は `AADSTS65001` で明確に拒否されますが、**app-only 側は成功し**、`roles` も
+`scp` も持たないトークンが返ります。両者が食い違うのは `.default` の意味が異なるからです。サインイン
+した利用者にとっては「すでに同意済みのスコープ全部」で、同意が 0 個ならエラーになります。
+クライアント資格情報にとっては「割り当て済みのアプリ ロール全部」で、割り当てが 0 個なら単に空の
+トークンになります。
 
-**A token being issued is not the same as the app being able to do anything.** Entra hands out tokens
-for resources an app was granted nothing for — client credentials against a resource with no assigned
-app roles still succeeds, as long as that resource's service principal exists in the tenant — and the
-token comes back carrying no roles and no scopes. It is a valid token that every call refuses. Judging
-by issuance alone would report such an app as reaching a resource it cannot touch, which is precisely
-the mistake this tool exists to prevent.
+**トークンが発行されたことと、アプリが何かできることは同じではありません。** Entra は、アプリに
+何も付与されていないリソースに対してもトークンを渡します ― アプリ ロールが 1 つも割り当てられて
+いないリソースへのクライアント資格情報の要求も、そのリソースのサービス プリンシパルがテナントに
+存在する限り成功します ― そして返るトークンは roles も scopes も持ちません。有効ではあるが、それを
+使った呼び出しはすべて拒否されるトークンです。発行の有無だけで判断すると、触れないリソースに
+届いているとそのアプリを報告してしまいます。それこそ、このツールが防ぐために存在する間違いです。
 
-So each cell reports both halves: whether a token came back, and what it carries. The report reads the
-`roles` and `scp` claims out of the token's payload and prints them. Those claims are **read, not
-verified**: this tool is not the audience of any of these tokens and makes no trust decision based on
-them, so a signature check would answer a question nobody here is asking. No token-handling library is
-pulled in for it.
+そこで各セルは両方を報告します: トークンが返ってきたか、そして **それが何を持っているか**。レポートは
+トークンのペイロードから `roles` と `scp` のクレームを読んで出力します。これらのクレームは
+**読むだけで、検証はしません**。このツールはどのトークンの受け手でもなく、トークンに基づく信頼の
+判断を一切しないので、署名の検証は誰も問うていない問いに答えることになります。そのための
+トークン処理ライブラリも導入していません。
 
-Refused cells carry the error code verbatim, because the code is the only thing that separates *"this
-app was not granted that"* from *"that resource does not exist in this tenant"* — both of which look
-identical as a failed token request.
+拒否されたセルにはエラーコードがそのまま載ります。**「このアプリにそれが付与されていない」と
+「そのリソースがこのテナントに存在しない」を分けられるのはコードだけ** だからです ― 失敗した
+トークン要求としては、どちらも同じ形をしています。
 
-Timings say `cached` when the credential answered from its own in-memory cache rather than asking the
-issuer, so a cache hit is not misread as a very fast network round trip.
+所要時間の欄は、資格情報が自身のメモリ キャッシュから答えた場合に `cached` と表示します。キャッシュ
+ヒットが「非常に速いネットワーク往復」と読み違えられないようにするためです。
 
-Delegated sign-in is a device code flow. The code, the sign-in URL and the configured
-`DelegatedUserHint` are all printed before the prompt; signing in with an administrator account
-instead of the intended reader silently invalidates the comparison, so the account to use is on
-screen. Sign-in happens once, against Graph, and the other audiences are then requested silently, so
-an unconsented audience comes back as a refusal instead of parking the run on a second prompt.
+委任のサインインはデバイス コード フローです。コード、サインイン URL、そして設定した
+`DelegatedUserHint` は、いずれもプロンプトの前に表示されます。意図した閲覧者ではなく管理者アカウント
+でサインインすると、この比較は黙って無意味になるので、使うべきアカウントを画面に出しています。
+サインインは Graph に対して 1 回だけ行い、以降の audience はサイレントで要求します。そのため同意の
+ない audience は、2 回目のプロンプトで実行を止めることなく、拒否として返ります。
 
 ### `access`
 
-Reads one file's permission list twice — app-only and delegated — **in a single execution**, so that
-both halves describe the same moment. Each leg walks the same three calls:
+同一ファイルの権限一覧を 2 回 ― app-only と delegated で ― **1 回の実行のうちに** 読みます。両方が
+同じ瞬間を記述するようにするためです。どちらの経路も同じ 3 つの呼び出しを辿ります。
 
 ```
-GET /v1.0/sites/{host}:{server-relative-path}          -> site ID
-GET /v1.0/sites/{site-id}/drive/root:/{file-path}      -> item ID
-GET /v1.0/sites/{site-id}/drive/items/{item-id}/permissions
+GET /v1.0/sites/{ホスト名}:{サーバー相対パス}            -> サイト ID
+GET /v1.0/sites/{サイトID}/drive/root:/{ファイルパス}    -> アイテム ID
+GET /v1.0/sites/{サイトID}/drive/items/{アイテムID}/permissions
 ```
 
-Each path lookup is resolved to an ID before the next URL is built. Graph's path addressing uses a
-single colon segment, and a URL that chains two of them is rejected with a `400`.
+パスによる指定は、次の URL を組み立てる前に必ず ID へ解決します。Graph のパス指定はコロン区間を
+1 つしか使えず、2 つつないだ URL は `400` で弾かれます。
 
-Per mode the report records the HTTP status of each call, the number of permission entries, the
-kinds of principal that appeared in them (`user`, `group`, `siteGroup`, `application`, `link:…`), and
-the elapsed milliseconds. The full list of calls — URL, status, timing, Graph error code — is
-printed as its own table.
+モードごとに、各呼び出しの HTTP ステータス、権限エントリの件数、そこに現れたプリンシパルの種類
+(`user` / `group` / `siteGroup` / `application` / `link:…`)、所要ミリ秒を記録します。発行した呼び出しの
+全一覧 ― URL、送ったヘッダ、ステータス、所要時間、Graph のエラーコード ― は独立した表として出力
+されます。
 
-With a delegated user who is only a *visitor* on the site, both legs resolve the site and the file.
-The difference shows up in the last call, and it does not show up as a refusal:
+サイトの **閲覧者** でしかない委任ユーザーの場合、どちらの経路もサイトとファイルの解決には成功します。
+差が出るのは最後の呼び出しで、しかもそれは拒否という形では現れません。
 
 ```
 | mode      | site   | item   | permissions | entries | principal kinds                            |
@@ -219,56 +220,58 @@ The difference shows up in the last call, and it does not show up as a refusal:
 | delegated | 200 OK | 200 OK | 200 OK      | 0       | -                                          |
 ```
 
-**Graph does not refuse the delegated caller. It answers `200 OK` with an empty collection.** The
-permission entries are filtered to what the caller may see, and a caller who may see none is told
-"success, nothing here" — for the same item, at the same moment, that the app-only leg sees four
-entries for.
+**Graph は委任の呼び出し元を拒否しません。空のコレクションつきで `200 OK` を返します。** 権限エントリ
+は呼び出し元が見てよいものだけに絞られ、1 件も見てよいものがない呼び出し元には「成功、中身は空」と
+告げられます ― app-only 側が 4 件見えているのと、同じアイテムの、同じ瞬間にです。
 
-That is worth more than a `403` would have been, because it is the harder mistake to catch: nothing in
-the status code separates *"this file is shared with nobody"* from *"this file's sharing is not yours
-to see"*. Code that reads the delegated answer alone and concludes the file is unshared gets the
-opposite of the truth. Running both legs together, in one execution, is what makes the gap visible.
+これは `403` が返るより価値のある観測です。捕まえるのが難しい間違いだからです。**ステータス コードには
+「このファイルは誰とも共有されていない」と「このファイルの共有は自分に見せてもらえない」を分ける
+ものが何もありません。** 委任側の答えだけを読んで「共有されていない」と結論するコードは、真逆の結果を
+得ます。両方の経路を 1 回の実行でまとめて叩くことが、この隙間を見えるようにしています。
 
-The delegated token's elapsed time includes the wait for a person to complete the device code sign-in,
-and the report says so rather than presenting a minute and a half as service latency.
+委任のトークンの所要時間には、人がデバイス コードのサインインを終えるまでの待ち時間が含まれます。
+1 分半をサービスの応答時間として提示しないよう、レポートはその旨を明記します。
 
-## Reading the output
+## 出力の読み方
 
-Every row of the report carries three things:
+レポートの各行は 3 つのものを持ちます。
 
-- **claim** — what was asserted before the run, including claims of refusal
-- **observed** — what came back
-- **verdict** — `Ok`, `Failed`, or `NotRun`
+- **主張 (claim)** ― 実行の前に立てた言明。拒否されるという主張も含みます
+- **観測 (observed)** ― 実際に返ってきたもの
+- **判定 (verdict)** ― `Ok` / `Failed` / `NotRun`
 
-`Ok` means the observation matched the claim. For a claim of refusal, `Ok` is a `403`.
+`Ok` は **観測が主張と一致した** ことを意味します。「呼び出しが成功した」ではありません。拒否を
+主張する行では、`403` が `Ok` です。
 
-`NotRun` exists so that *"we never got far enough to look"* has a value of its own: if the site never
-resolved, the permission read did not quietly pass — it did not happen. A blank cell reads as a pass;
-`NotRun` cannot.
+`NotRun` があるのは、*「そこまで到達しなかったので見ていない」* に固有の値を与えるためです。サイトが
+解決できなかったなら、権限の読み取りは黙って合格したのではなく、起きなかったのです。空欄は合格と
+読めてしまいますが、`NotRun` はそう読めません。
 
-Exit codes: `0` every claim held, `1` a claim was contradicted, `2` something never ran, `64` bad
-usage, `78` incomplete configuration, `130` cancelled.
+終了コード: `0` すべての主張が成立、`1` 主張が覆された、`2` 走らなかったものがある、`64` 使い方の
+誤り、`78` 設定が不完全、`130` 中断。
 
-## Layout
+## 構成
 
 ```
 src/CapabilityProbe.Cli/
-  Program.cs          subcommand dispatch
-  appsettings.json    key names, empty values
+  Program.cs          サブコマンドの分岐
+  appsettings.json    キー名のみ、値は空
   Configuration/      ProbeOptions, ProbeOptionsLoader
   Auth/               ProbeMode, ProbeAudience, ScopeResolver, ITokenSource,
                       AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
-  Http/               ProbeHttpClient — returns status and body, never throws on a response
+  Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
   Probes/             AuthProbe, AccessProbe
   Reporting/          Verdict, Observation, ProbeReport, ConsoleReportWriter, JsonReportWriter
 ```
 
-## Secrets
+コード内のコメントと識別子は英語です。
 
-Nothing secret is tracked. `appsettings.local.json`, `reports/` and `*.pfx` are git-ignored, tokens
-are held in memory only, and the recorded request headers show the bearer token's length rather than
-its value.
+## 秘密の扱い
 
-## License
+秘密は 1 つも追跡されていません。`appsettings.local.json`、`reports/`、`*.pfx`、
+`Properties/launchSettings.json` は git 管理外です。トークンはメモリ上にのみ保持されます。記録される
+要求ヘッダには、ベアラー トークンの値ではなくその長さが載ります。
 
-MIT — see [LICENSE](LICENSE).
+## ライセンス
+
+MIT ― [LICENSE](LICENSE) を参照してください。

@@ -1,247 +1,244 @@
-# Findings
+# 所見
 
-What running this probe against a real tenant turned up, and why each result mattered enough to change
-the tool.
+このプローブを実テナントに対して走らせて出てきたものと、それぞれがツールを変えるに足る理由。
 
-**These are observations, not documentation.** They come from one Microsoft 365 tenant, one app
-registration, one site and one file, on 2026-08-03. Every one of them contradicted a reasonable
-prediction made from the app's API permissions screen, which is the whole reason they are written down
-— but a single tenant is a single tenant. Re-run the probe against your own before relying on any of
-this. Tenant, site and account names below are placeholders.
+**これらは観測であって、仕様の説明ではありません。** 出所は 1 つの Microsoft 365 テナント、1 つの
+アプリ登録、1 つのサイト、1 つのファイルで、日付は 2026-08-03 です。ここに挙げた 3 つはいずれも、
+アプリの API アクセス許可画面から立てた妥当な予測を裏切りました ― 書き留める理由はそれです ― が、
+1 つのテナントは 1 つのテナントでしかありません。頼りにする前に、ご自身のテナントに対して走らせて
+ください。以下のテナント名・サイト名・アカウント名・各種 ID は伏せ字に置き換えてあります。
 
-Throughout, a distinction is worth holding onto: **what was measured** and **what explains it** are
-separate. The measurements are reproducible. The explanations are the reading that best fits them, and
-where a mechanism was not verified, it says so.
+全体を通じて、区別しておく価値のあるものが 1 つあります。**測定したこと** と **それを説明する読み**
+は別物です。測定は再現できます。説明は測定に最もよく合う読みであり、機構を確認していない箇所は
+その旨を明記しています。
 
-## The setup that produced them
+## 観測を生んだ設定
 
-One app registration, with admin consent granted for exactly this:
+アプリ登録は 1 つ。管理者の同意を与えたのは、正確に次のものだけです。
 
-| API | Permission | Type |
+| API | アクセス許可 | 種類 |
 | --- | --- | --- |
-| Microsoft Graph | `Sites.Read.All` | Application |
-| Microsoft Graph | `Sites.Read.All` | Delegated |
-| Microsoft Graph | `User.Read` | Delegated |
-| SharePoint | `Sites.Read.All` | Application |
+| Microsoft Graph | `Sites.Read.All` | アプリケーション |
+| Microsoft Graph | `Sites.Read.All` | 委任 |
+| Microsoft Graph | `User.Read` | 委任 |
+| SharePoint | `Sites.Read.All` | アプリケーション |
 
-Nothing else. In particular: **no SharePoint delegated permission, and nothing at all for Azure Rights
-Management** — those two gaps are what findings 1 and 2 are about.
+これ以外は何もありません。特に **SharePoint の委任アクセス許可は 1 つもなく、Azure Rights Management
+には何も付与していません** ― この 2 つの欠落が、所見 1 と所見 2 の主題です。
 
-*Allow public client flows* is enabled, for the device code leg. The person signing in for that leg is
-a **visitor** on the test site and holds no administrative role. The file is a single Word document
-sitting at the root of the site's default document library.
+「パブリック クライアント フローを許可する」は有効 (デバイス コード用)。委任側でサインインする人物は
+テスト用サイトの **閲覧者** であり、管理者ロールを持ちません。ファイルはサイトの既定のドキュメント
+ライブラリの直下に置かれた Word 文書 1 つです。
 
-Both subcommands were run twice: once to observe, once to confirm after the tool was corrected.
+どちらのサブコマンドも 2 回ずつ実行しました。1 回目は観測のため、2 回目はツールを直したあとの確認の
+ためです。
 
 ---
 
-## Finding 1 — Consent granted to Microsoft Graph reaches SharePoint
+## 所見 1 ― Microsoft Graph への同意が SharePoint に届く
 
-### Predicted
+### 予測
 
-The app has no SharePoint *delegated* permission. A delegated token request for the SharePoint resource
-should therefore be refused, the same way the Azure RMS one is.
+このアプリに SharePoint の **委任** アクセス許可はない。したがって SharePoint リソースへの委任
+トークン要求は、Azure RMS のそれと同じように拒否されるはずである。
 
-### Observed
+### 観測
 
-It succeeds, and the token is real:
+成功する。しかも本物のトークンが返る。
 
-| | value |
+| | 値 |
 | --- | --- |
 | `aud` | `00000003-0000-0ff1-ce00-000000000000` |
 | `scp` | `Sites.Read.All User.Read` |
 
-`00000003-0000-0ff1-ce00-000000000000` is the first-party application ID of SharePoint Online, so this
-is a genuine SharePoint-audience token and not the Graph token handed back by mistake. It took a
-network round trip and carries its own expiry, independent of the Graph token acquired moments earlier.
+`00000003-0000-0ff1-ce00-000000000000` は SharePoint Online の第一者アプリケーション ID です。つまり
+これは正真正銘 SharePoint 宛のトークンであり、直前に取得した Graph のトークンを取り違えて返したもの
+ではありません。ネットワーク往復を伴い、Graph のトークンとは独立した有効期限を持っています。
 
-The `scp` value is the part worth staring at. `Sites.Read.All User.Read` is an **exact mirror of the
-app's Microsoft Graph delegated grants** — both of them, in the same order, and nothing else.
+じっと見る価値があるのは `scp` の値のほうです。`Sites.Read.All User.Read` は、**このアプリの
+Microsoft Graph 委任付与の完全な写し** です ― 2 つとも、同じ順序で、それ以外は何もありません。
 
-For contrast, in the same run, on the same credential:
+対比として、同じ実行の、同じ資格情報で:
 
-| audience | mode | result |
+| audience | モード | 結果 |
 | --- | --- | --- |
-| SharePoint | delegated | token, `scp: Sites.Read.All User.Read` |
-| Azure RMS | delegated | refused, `AADSTS65001` |
+| SharePoint | 委任 | トークン、`scp: Sites.Read.All User.Read` |
+| Azure RMS | 委任 | 拒否、`AADSTS65001` |
 
-Azure RMS has no Graph counterpart consented, and it is refused. SharePoint does, and it is not.
+Azure RMS には対応する Graph 側の同意がなく、拒否されます。SharePoint にはあり、拒否されません。
 
-### What this means
+### これが意味すること
 
-Consenting to Microsoft Graph's delegated `Sites.Read.All` produced delegated access to the SharePoint
-resource as well. **Nothing on the API permissions screen says so.** Reading that screen and concluding
-"this app cannot act against SharePoint on a user's behalf" is wrong, and no amount of further reading
-of that screen would reveal it. It only surfaces by requesting a token and looking inside.
+Microsoft Graph の委任 `Sites.Read.All` への同意が、SharePoint リソースに対する委任アクセスも生んで
+います。**API アクセス許可の画面にそう書いてある箇所はありません。** その画面を読んで「このアプリは
+利用者の代理で SharePoint に対して動けない」と結論するのは誤りであり、その画面をどれだけ読み込んでも
+この事実は現れません。トークンを要求して中を見ることでしか表に出てきません。
 
-### Not verified
+### 確認していないこと
 
-- **The mechanism.** Pre-authorization of Graph on the SharePoint resource, scope matching by name
-  across first-party resources, and a tenant-wide grant created as a side effect of admin consent
-  would all produce this. Which one is at work here was not determined, and the probe does not need to
-  know in order to report the outcome.
-- **Whether the token works.** The `scp` claim says `Sites.Read.All`; nothing here calls SharePoint
-  REST with the token to confirm the resource honours it. Actually issuing that call is the obvious
-  next thing to measure, and is deliberately outside this tool's scope.
-- **The application direction.** The app has SharePoint's own `Sites.Read.All` granted explicitly, so
-  this run cannot say whether Graph's *application* permission would flow through the same way. It
-  would take an app registration without the SharePoint application grant to find out.
+- **機構。** SharePoint リソース側での Graph の事前承認、第一者リソース間でのスコープ名の一致、
+  管理者同意の副作用として作られたテナント全体の付与 ― いずれもこの結果を生みます。ここで実際に
+  働いているのがどれかは特定していません。そして結果を報告するうえで、プローブがそれを知る必要は
+  ありません。
+- **そのトークンが実際に効くか。** `scp` クレームは `Sites.Read.All` と言っていますが、そのトークンで
+  SharePoint REST を叩いてリソース側が実際に受け入れるかは確認していません。**その呼び出しを実際に
+  行うことが、次に測るべき最も明白なもの** です。このツールのスコープからは意図的に外してあります。
+- **アプリケーション側の方向。** このアプリには SharePoint 自身の `Sites.Read.All` が明示的に付与されて
+  いるため、この実行からは Graph の **アプリケーション** アクセス許可が同じように流れ込むかどうかは
+  分かりません。それを知るには、SharePoint のアプリケーション付与を持たないアプリ登録が要ります。
 
-### Encoded as
+### コードへの反映
 
-`AuthProbe.ExpectsPermission` expects a permission for `(SharePoint, Delegated)`. Removing the Graph
-delegated grant should flip that cell to `[!]`, which is the regression the expectation is kept for.
+`AuthProbe.ExpectsPermission` は `(SharePoint, Delegated)` について権限の保持を期待します。Graph の
+委任付与を外せばこのセルは `[!]` に反転するはずで、この期待値を残しているのはその回帰のためです。
 
 ---
 
-## Finding 2 — Client credentials issues tokens that carry nothing
+## 所見 2 ― クライアント資格情報は、何も持たないトークンを発行する
 
-### Predicted
+### 予測
 
-No Azure RMS permission is granted in either direction, so both legs should be refused.
+Azure RMS のアクセス許可は両方向とも付与していないので、両方の経路が拒否されるはずである。
 
-### Observed
+### 観測
 
-The two legs disagree:
+2 つの経路が食い違う。
 
-| mode | result |
+| モード | 結果 |
 | --- | --- |
-| delegated | refused, `AADSTS65001` — *"The user or administrator has not consented to use the application"* |
-| app-only | **token issued**, `aud: https://aadrm.com`, no `roles`, no `scp` |
+| 委任 | 拒否、`AADSTS65001` ― *"The user or administrator has not consented to use the application"* |
+| app-only | **トークン発行**、`aud: https://aadrm.com`、`roles` なし、`scp` なし |
 
-A valid token, for the right audience, carrying no permission of any kind.
+正しい audience 宛の、有効な、そしていかなる権限も持たないトークン。
 
-### What this means
+### これが意味すること
 
-`.default` means something different to each flow, and zero is where they part company:
+`.default` は 2 つのフローで違うものを意味し、**ゼロ個のところで両者は袂を分かちます**。
 
-| flow | `.default` means | with zero granted |
+| フロー | `.default` の意味 | 付与が 0 個のとき |
 | --- | --- | --- |
-| delegated | every scope already consented for this resource | error — `AADSTS65001` |
-| client credentials | every app role assigned for this resource | a token with no `roles` |
+| 委任 | このリソースに対してすでに同意済みのスコープ全部 | エラー ― `AADSTS65001` |
+| クライアント資格情報 | このリソースに対して割り当て済みのアプリ ロール全部 | `roles` を持たないトークン |
 
-So for client credentials, a token request succeeding says only that **the resource's service principal
-exists in the tenant**. It says nothing about whether the app may do anything with it. Azure RMS is
-provisioned alongside Microsoft 365, so its service principal is present, and the request succeeds.
+つまりクライアント資格情報においては、トークン要求の成功が言っているのは **そのリソースのサービス
+プリンシパルがテナントに存在すること** だけです。アプリがそれで何かしてよいかについては、何も言って
+いません。Azure RMS は Microsoft 365 と一緒にプロビジョニングされるのでサービス プリンシパルは存在し、
+要求は成功します。
 
-This is the trap the whole tool exists to avoid walking into. A capability probe that reports "token
-issued" as a success reports this app as reaching Azure RMS. It reaches nothing there: every call made
-with that token will be refused by the resource.
+これこそ、このツール全体が踏まないために存在する罠です。「トークン発行 = 成功」と報告する能力プローブ
+は、このアプリが Azure RMS に届いていると報告します。届いていません。そのトークンを使った呼び出しは、
+リソース側にすべて拒否されます。
 
-### Not verified
+### 確認していないこと
 
-That an actual Azure RMS API call with this token is refused. It follows from an empty `roles` claim,
-but it was not measured — the tool acquires tokens for this audience and does not use them.
+このトークンで実際に Azure RMS の API を呼ぶと拒否されること。`roles` クレームが空であることからは
+そう導かれますが、測定はしていません ― このツールはこの audience のトークンを取得するだけで、使いません。
 
-### Encoded as
+### コードへの反映
 
-`auth` no longer judges on token issuance. It reads the `roles` and `scp` claims out of each issued
-token and judges on whether **anything was granted**. With that change, this cell reports what it
-should have all along: `token, but nothing granted`, and the expectation of no usable permission holds.
+`auth` はトークンの発行で判定しなくなりました。発行された各トークンから `roles` と `scp` のクレームを
+読み、**何かが付与されているか** で判定します。この変更により、このセルは初めから報告すべきだったこと
+を報告します: `token, but nothing granted` ― そして「使える権限を持たない」という期待が成立します。
 
-The claims are **read, not verified**. This tool is not the audience of any of these tokens and makes
-no trust decision based on one, so checking a signature would answer a question nobody is asking. No
-token-handling library is pulled in for it.
+クレームは **読むだけで、検証はしません**。このツールはどのトークンの受け手でもなく、トークンに基づく
+信頼の判断を一切しないので、署名の検証は誰も問うていない問いに答えることになります。そのための
+トークン処理ライブラリも導入していません。
 
 ---
 
-## Finding 3 — A permission list you may not see comes back as an empty success
+## 所見 3 ― 見せてもらえない権限一覧は、空の成功として返ってくる
 
-### Predicted
+### 予測
 
-The signed-in person is a visitor. Reading an item's permission list is not a visitor's business, so
-the delegated leg should be refused with `403`.
+サインインする人物は閲覧者である。アイテムの権限一覧を読むことは閲覧者の領分ではないので、委任側は
+`403` で拒否されるはずである。
 
-### Observed
+### 観測
 
-Not refused. Same file, same moment, one execution:
+拒否されない。同じファイル、同じ瞬間、1 回の実行で:
 
-| mode | site | item | permissions | entries | principal kinds |
+| モード | site | item | permissions | 件数 | プリンシパルの種類 |
 | --- | --- | --- | --- | --- | --- |
 | app-only | `200 OK` | `200 OK` | `200 OK` | **4** | `sharePointGroup, siteGroup, siteUser, user` |
-| delegated | `200 OK` | `200 OK` | `200 OK` | **0** | — |
+| 委任 | `200 OK` | `200 OK` | `200 OK` | **0** | ― |
 
-All six calls succeeded. Graph answers the delegated caller `200 OK` with an empty collection: the
-permission entries are filtered to what that caller may see, and a caller who may see none is told
-*"success, nothing here."*
+6 つの呼び出しがすべて成功しています。Graph は委任の呼び出し元に、空のコレクションつきで `200 OK` と
+答えます。権限エントリはその呼び出し元が見てよいものだけに絞られ、1 件も見てよいものがない呼び出し元
+は *「成功、中身は空」* と告げられます。
 
-### What this means
+### これが意味すること
 
-**The status code cannot tell these two situations apart:**
+**ステータス コードでは、次の 2 つを区別できません。**
 
-- this file is shared with nobody
-- this file's sharing is not yours to see
+- このファイルは誰とも共有されていない
+- このファイルの共有は自分に見せてもらえない
 
-Both are `200 OK` with `"value": []`. Code that reads the delegated answer on its own and concludes the
-file is unshared gets the exact opposite of the truth — here, four principals have access.
+どちらも `200 OK` と `"value": []` です。委任側の答えだけを読んで「共有されていない」と結論するコード
+は、真実の正反対を得ます ― ここでは 4 つのプリンシパルがアクセスを持っています。
 
-This is worse than a `403` would have been. A refusal is loud, and an unhandled refusal usually stops
-the caller. An empty success is quiet, it flows straight into whatever comes next, and it looks like
-information.
+これは `403` が返るより **たちが悪い** ものです。拒否は騒がしく、処理されない拒否はたいてい呼び出し元を
+止めます。空の成功は静かで、次の処理にそのまま流れ込み、しかも情報のように見えます。
 
-It is also the same hazard the tool guards against internally with `Verdict.NotRun` — *"we never got
-far enough to look"* must not be storable as a blank that reads like a pass — except here it is Graph's
-own response shape doing the conflating, one layer further out.
+これは、このツールが `Verdict.NotRun` で内部的に防いでいるのと同じ危険でもあります ― *「そこまで到達
+しなかったので見ていない」* を、合格のように読める空欄として保存してはならない ― ただしここでは、
+Graph 自身の応答の形が 1 つ外側の層で同じ混同をやっています。
 
-Two things make it visible at all. Both legs run in **one execution**, so the two answers describe the
-same item at the same moment and can be set against each other; had they been separate runs, the
-difference could always be explained away as something having changed in between. And the entry **count
-is recorded separately from the status**, so `200 OK / 4` and `200 OK / 0` do not collapse into one
-another.
+これが見えるようにしているものが 2 つあります。両方の経路が **1 回の実行** で走るので、2 つの答えは
+同じアイテムの同じ瞬間を記述しており、突き合わせられます。別々の実行だったなら、この差は「その間に
+何かが変わった」でいつでも説明がついてしまいます。もう 1 つは、**件数がステータスとは別に記録される**
+ことです。そのおかげで `200 OK / 4` と `200 OK / 0` は互いに潰れ合いません。
 
-### Not verified
+### 確認していないこと
 
-Whether a delegated caller with more site permission — a member or owner rather than a visitor — sees a
-non-empty list. That would confirm filtering is by the caller's rights rather than something else about
-the request, and it only takes running `access` again with a different sign-in.
+サイトに対してより強い権限を持つ委任呼び出し元 ― 閲覧者ではなくメンバーや所有者 ― が空でない一覧を
+見るかどうか。それが確認できれば、絞り込みが呼び出し元の権限によるものであって、要求の他の何かによる
+ものではないと裏付けられます。別のアカウントで `access` を走らせるだけで済みます。
 
-### Encoded as
+### コードへの反映
 
-The delegated claim is about what is revealed, not about the HTTP status: *"the permission list does not
-reveal the file's permission entries."* A `403` and a `200` with zero entries both satisfy it. When the
-two legs return the same status with different contents, the report says so in the observation rather
-than leaving a reader to spot it in the numbers.
+委任側の主張は、HTTP ステータスではなく **何が明かされたか** についてのものになりました:
+*「権限一覧はこのファイルの権限エントリを明かさない」*。`403` でも、`200` かつ 0 件でも、どちらも成立
+します。2 つの経路が同じステータスで違う中身を返した場合、レポートはその旨を観測の文言に書きます ―
+読み手が数字から自力で気づくのに任せません。
 
 ---
 
-## The thread running through all three
+## 3 つを貫くもの
 
-Every one of these is the same mistake in a different costume: **treating the absence of an error as
-evidence of capability.**
+いずれも同じ間違いが違う衣装を着たものです。**エラーがないことを、能力がある証拠として扱うこと。**
 
-| what looks like success | what it actually was |
+| 成功に見えるもの | 実際に何だったか |
 | --- | --- |
-| a token was issued for Azure RMS | a token carrying no permission at all |
-| no SharePoint delegated permission is listed | a delegated SharePoint token with `Sites.Read.All` in it |
-| the permission list returned `200 OK` | an empty list, because the caller may see none of it |
+| Azure RMS のトークンが発行された | 権限を 1 つも持たないトークン |
+| SharePoint の委任アクセス許可は一覧にない | `Sites.Read.All` を持つ SharePoint 宛の委任トークン |
+| 権限一覧が `200 OK` を返した | 呼び出し元が 1 件も見てよくないため空になった一覧 |
 
-The permissions screen is a statement of intent. The token is a statement of what was granted. The
-response body is a statement of what this caller may see. They are three different things, and the run
-recorded here is one where all three disagreed.
+アクセス許可の画面は **意図** の表明です。トークンは **何が付与されたか** の表明です。応答の本文は
+**この呼び出し元が何を見てよいか** の表明です。3 つは別物であり、ここに記録した実行は、その 3 つが
+すべて食い違ったものでした。
 
-## What this investigation did not establish
+## この調査が確立していないこと
 
-Collected in one place, since a finding's edges matter as much as its middle:
+所見は縁のほうが中身と同じくらい重要なので、1 箇所にまとめます。
 
-- Whether any of the tokens obtained actually work against their resources. Nothing here calls
-  SharePoint REST or Azure RMS.
-- The mechanism behind finding 1.
-- Whether Graph *application* permissions flow through to SharePoint the way the delegated ones do.
-- What a delegated caller with more than visitor rights sees in the permission list.
-- Whether any of this holds in another tenant, in another cloud, or with a differently configured app
-  registration.
+- 取得したトークンのいずれかが、実際にリソースに対して機能するかどうか。ここでは SharePoint REST も
+  Azure RMS も呼んでいません
+- 所見 1 の背後にある機構
+- Graph の **アプリケーション** アクセス許可が、委任のものと同じように SharePoint へ流れ込むかどうか
+- 閲覧者より強い権限を持つ委任呼び出し元が、権限一覧に何を見るか
+- これらのいずれかが、別のテナント、別のクラウド、あるいは別の構成のアプリ登録でも成り立つかどうか
 
-## Reproducing
+## 再現するには
 
 ```bash
 dotnet run --project src/CapabilityProbe.Cli -- auth
 dotnet run --project src/CapabilityProbe.Cli -- access
 ```
 
-Configuration and the app registration setup are in the [README](../README.md). Both subcommands write
-a JSON report under `reports/`, timestamped, containing every URL called, the headers sent, the status
-returned and the verdict reached — which is what makes a run from months ago still worth something.
+設定とアプリ登録の準備は [README](../README.md) にあります。どちらのサブコマンドも `reports/` の下に
+タイムスタンプつきの JSON レポートを書きます。そこには叩いた全 URL、送ったヘッダ、返ったステータス、
+下した判定が入っています ― 数か月後の実行結果が依然として価値を持つのは、そのためです。
 
-Sign in as the intended non-administrative account when the device code prompt appears. Signing in as
-an administrator quietly turns finding 3 into a different observation, and the tool will tell you which
-account it got but will not stop you.
+デバイス コードのプロンプトが出たら、意図した非管理者アカウントでサインインしてください。管理者で
+サインインすると、所見 3 は黙って別の観測に変わります。ツールはどのアカウントで入ったかを表示します
+が、止めはしません。
