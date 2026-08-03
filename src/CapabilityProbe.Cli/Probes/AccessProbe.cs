@@ -294,6 +294,14 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
 
     private static string Status(HttpObservation? observation) => observation is null ? "NotRun" : observation.StatusText;
 
+    /// <summary>
+    /// The headers actually sent, as recorded per call. Stating them once in a table heading would be a
+    /// claim about the calls; this is the record of each one, and it is what makes a call reproducible
+    /// by hand. The bearer value is not among them - only its length, so a reader can see a token was
+    /// there without the report becoming something that must be handled carefully.
+    /// </summary>
+    private static string HeadersOf(HttpObservation observation) => string.Join(" | ", observation.RequestHeaders);
+
     /// <summary>Graph puts its own code in the body; that code says more than the HTTP status alone.</summary>
     private static string ErrorCodeOf(HttpObservation observation)
     {
@@ -356,7 +364,12 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
             run.SiteId is null ? $"{run.Site.StatusText} {ErrorCodeOf(run.Site)}".Trim() : $"{run.Site.StatusText}, id resolved",
             run.SiteId is null ? Verdict.Failed : Verdict.Ok)
         {
-            Details = Details(run, ("url", run.Site.Url), ("status", run.Site.StatusText), ("elapsedMs", run.Site.ElapsedMs.ToString())),
+            Details = Details(
+                run,
+                ("url", run.Site.Url),
+                ("requestHeaders", HeadersOf(run.Site)),
+                ("status", run.Site.StatusText),
+                ("elapsedMs", run.Site.ElapsedMs.ToString())),
         };
     }
 
@@ -373,7 +386,12 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
             run.ItemId is null ? $"{run.Item.StatusText} {ErrorCodeOf(run.Item)}".Trim() : $"{run.Item.StatusText}, id resolved",
             run.ItemId is null ? Verdict.Failed : Verdict.Ok)
         {
-            Details = Details(run, ("url", run.Item.Url), ("status", run.Item.StatusText), ("elapsedMs", run.Item.ElapsedMs.ToString())),
+            Details = Details(
+                run,
+                ("url", run.Item.Url),
+                ("requestHeaders", HeadersOf(run.Item)),
+                ("status", run.Item.StatusText),
+                ("elapsedMs", run.Item.ElapsedMs.ToString())),
         };
     }
 
@@ -418,6 +436,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
             Details = Details(
                 run,
                 ("url", run.Permissions.Url),
+                ("requestHeaders", HeadersOf(run.Permissions)),
                 ("status", run.Permissions.StatusText),
                 ("graphErrorCode", ErrorCodeOf(run.Permissions)),
                 ("entryCount", run.PermissionEntryCount?.ToString()),
