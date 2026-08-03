@@ -66,7 +66,8 @@ jobs:
         run: |
           echo "The next step requests app-only tokens first, then stops and prints a device code."
           echo "Open the URL it prints, enter the code, and sign in as: ${{ inputs.delegated_user_hint }}"
-          echo "Signing in as anyone else measures that person's reach instead - the report says so if you do."
+          echo "Signing in as anyone else measures that person's reach instead. The report records"
+          echo "which account actually completed the sign-in, so a run is never silently about someone else."
 
       - name: Probe
         # The delegated sign-in is the long pole. Bounded here so a timeout is attributed to the
@@ -88,10 +89,12 @@ jobs:
           status=0
           dotnet run --project src/CapabilityProbe.Cli -c Release --no-build -- "$SUBCOMMAND" || status=$?
 
+          # The exit code says whether the probe finished measuring, not whether the tenant behaved.
+          # A refusal, an empty list and a token carrying nothing are all successful measurements and
+          # all exit 0. Read the tables for what was found; read this for whether it finished.
           echo
           case "$status" in
-            0)   echo "exit 0   - every claim held" ;;
-            1)   echo "exit 1   - a claim was contradicted; read the [!] cells above" ;;
+            0)   echo "exit 0   - everything was measured; the findings are in the tables above" ;;
             2)   echo "exit 2   - something never ran; the delegated sign-in most likely went uncompleted" ;;
             64)  echo "exit 64  - bad usage" ;;
             78)  echo "exit 78  - configuration is incomplete; the missing keys are listed above" ;;

@@ -14,7 +14,7 @@ public sealed class ConsoleReportWriter(TextWriter writer)
         writer.WriteLine($"started  {report.StartedAtUtc:u}");
         foreach (var (key, value) in report.Subject)
         {
-            writer.WriteLine($"{key,-9}{value}");
+            writer.WriteLine($"{key,-12}{value}");
         }
 
         foreach (var table in report.Tables)
@@ -25,19 +25,19 @@ public sealed class ConsoleReportWriter(TextWriter writer)
         }
 
         writer.WriteLine();
-        writer.WriteLine("Claims");
+        writer.WriteLine("Observations");
         WriteGrid(
-            ["claim", "observed", "verdict"],
-            report.Observations.Select(o => (IReadOnlyList<string?>)new[] { o.Claim, o.Observed, o.Verdict.ToString() }).ToList());
+            ["subject", "observed", "status"],
+            report.Observations.Select(o => (IReadOnlyList<string?>)new[] { o.Subject, o.Observed, o.Status.ToString() }).ToList());
 
         writer.WriteLine();
         writer.WriteLine(
-            $"{report.Count(Verdict.Ok)} Ok / {report.Count(Verdict.Failed)} Failed / {report.Count(Verdict.NotRun)} NotRun");
+            $"{report.Count(MeasurementStatus.Measured)} measured / {report.Count(MeasurementStatus.NotRun)} not run");
 
-        if (report.Count(Verdict.Failed) > 0)
+        if (report.Count(MeasurementStatus.NotRun) > 0)
         {
-            writer.WriteLine("Failed means the observation contradicted the claim - read the row, then decide");
-            writer.WriteLine("whether the claim or the tenant is what needs revisiting.");
+            writer.WriteLine("NotRun rows have no value at all - not a zero. Something stopped before reaching them,");
+            writer.WriteLine("and the row above each one usually says what.");
         }
 
         writer.WriteLine();

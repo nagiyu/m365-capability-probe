@@ -34,11 +34,12 @@ public sealed class ProbeReport
 
     public void Finish() => FinishedAtUtc = DateTimeOffset.UtcNow;
 
-    public int Count(Verdict verdict) => Observations.Count(o => o.Verdict == verdict);
+    public int Count(MeasurementStatus status) => Observations.Count(o => o.Status == status);
 
     /// <summary>
-    /// Exit code for the process. Non-zero only when an observation contradicted its claim or a step
-    /// never ran - never merely because a call was refused, since refusals are the expected result here.
+    /// Exit code for the process. It answers "did the probe finish measuring", not "did the tenant
+    /// behave". A refusal, an empty list and a token carrying nothing are all successful measurements
+    /// and all exit zero; only a step that never ran leaves the run incomplete.
     /// </summary>
-    public int ExitCode => Count(Verdict.Failed) > 0 ? 1 : Count(Verdict.NotRun) > 0 ? 2 : 0;
+    public int ExitCode => Count(MeasurementStatus.NotRun) > 0 ? 2 : 0;
 }

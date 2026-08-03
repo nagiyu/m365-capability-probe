@@ -47,7 +47,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         report.Subject["client"] = options.ClientId;
         report.Subject["site"] = options.SiteUrl;
         report.Subject["file"] = options.FilePath;
-        report.Subject["sign-in"] = options.DelegatedUserHint;
+        report.Subject["hint"] = options.DelegatedUserHint;
 
         var calls = new List<CallRecord>();
 
@@ -58,6 +58,12 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         console.WriteLine("Reading the same file on behalf of a signed-in person (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
         var delegatedToken = await delegatedSource.SignInAsync(cancellationToken);
+
+        // Who actually signed in, not who was configured to. The delegated half of every number below
+        // is a statement about that account, so a report that names the hint instead is asserting
+        // something it never measured.
+        report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
+
         var delegatedRun = await WalkAsync(ProbeMode.Delegated, delegatedToken, calls, cancellationToken);
 
         report.Add(BuildComparison(appOnlyRun, delegatedRun));
@@ -326,95 +332,101 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
 
     private static Observation TokenObservation(ModeRun run)
     {
-        var claim = $"{run.Mode.Display()}: a Graph token can be acquired for the file read";
-        if (run.Token.Succeeded)
+        var subject = $"{run.Mode.Display()}: the Graph token for the file read";
+        if (!run.Token.Succeeded)
         {
-            // The delegated token is the device code sign-in, so most of its elapsed time is a person
-            // reading a screen. Reporting it next to service timings without saying so invites the
-            // reading that Entra took a minute and a half to answer.
-            var timing = run.Mode == ProbeMode.Delegated
-                ? $"{run.Token.ElapsedMs} ms, including the wait for the person to sign in"
-                : $"{run.Token.ElapsedMs} ms";
-
-            return new Observation(claim, $"token issued ({timing})", Verdict.Ok)
+            return Observation.Measured(subject, $"refused with {run.Token.ErrorCode}") with
             {
-                Details = Details(
-                    run,
-                    ("elapsedMs", run.Token.ElapsedMs.ToString()),
-                    ("elapsedIncludesSignIn", run.Mode == ProbeMode.Delegated ? "true" : "false")),
+                Details = Details(run, ("errorCode", run.Token.ErrorCode), ("errorDetail", run.Token.ErrorDetail)),
             };
         }
 
-        return new Observation(claim, $"refused with {run.Token.ErrorCode}", Verdict.Failed)
+        // The delegated token is the device code sign-in, so most of its elapsed time is a person
+        // reading a screen. Reporting it next to service timings without saying so invites the
+        // reading that Entra took a minute and a half to answer.
+        var timing = run.Mode == ProbeMode.Delegated
+            ? $"{run.Token.ElapsedMs} ms, including the wait for the person to sign in"
+            : $"{run.Token.ElapsedMs} ms";
+
+        return Observation.Measured(subject, $"issued ({timing})") with
         {
-            Details = Details(run, ("errorCode", run.Token.ErrorCode), ("errorDetail", run.Token.ErrorDetail)),
+            Details = Details(
+                run,
+                ("elapsedMs", run.Token.ElapsedMs.ToString()),
+                ("elapsedIncludesSignIn", run.Mode == ProbeMode.Delegated ? "true" : "false"),
+                ("signedInAs", run.Token.Claims?.SignedInAs)),
         };
     }
 
     private static Observation SiteObservation(ModeRun run)
     {
-        var claim = $"{run.Mode.Display()}: the site resolves from its URL to a site ID";
+        var subject = $"{run.Mode.Display()}: resolving the site URL to a site ID";
         if (run.Site is null)
         {
-            return Observation.NotRun(claim, "no Graph token was issued for this mode");
+            return Observation.NotRun(subject, "no Graph token was issued for this mode");
         }
 
-        return new Observation(
-            claim,
-            run.SiteId is null ? $"{run.Site.StatusText} {ErrorCodeOf(run.Site)}".Trim() : $"{run.Site.StatusText}, id resolved",
-            run.SiteId is null ? Verdict.Failed : Verdict.Ok)
+        return Observation.Measured(
+            subject,
+            run.SiteId is null
+                ? $"{run.Site.StatusText} {ErrorCodeOf(run.Site)}".Trim()
+                : $"{run.Site.StatusText}, id resolved") with
         {
             Details = Details(
                 run,
                 ("url", run.Site.Url),
                 ("requestHeaders", HeadersOf(run.Site)),
                 ("status", run.Site.StatusText),
+                ("graphErrorCode", ErrorCodeOf(run.Site)),
                 ("elapsedMs", run.Site.ElapsedMs.ToString())),
         };
     }
 
+    /// <summary>
+    /// Resolving the path to an item ID. Worth watching in its own right: an item the caller may not
+    /// see comes back as a not-found rather than a refusal, which is the same answer a mistyped path
+    /// gets. The URL and the Graph error code are both recorded so the two can still be told apart.
+    /// </summary>
     private static Observation ItemObservation(ModeRun run)
     {
-        var claim = $"{run.Mode.Display()}: the file resolves from its path to an item ID";
+        var subject = $"{run.Mode.Display()}: resolving the file path to an item ID";
         if (run.Item is null)
         {
-            return Observation.NotRun(claim, "the site was never resolved, so no item lookup was built");
+            return Observation.NotRun(subject, "the site was never resolved, so no item lookup was built");
         }
 
-        return new Observation(
-            claim,
-            run.ItemId is null ? $"{run.Item.StatusText} {ErrorCodeOf(run.Item)}".Trim() : $"{run.Item.StatusText}, id resolved",
-            run.ItemId is null ? Verdict.Failed : Verdict.Ok)
+        return Observation.Measured(
+            subject,
+            run.ItemId is null
+                ? $"{run.Item.StatusText} {ErrorCodeOf(run.Item)}".Trim()
+                : $"{run.Item.StatusText}, id resolved") with
         {
             Details = Details(
                 run,
                 ("url", run.Item.Url),
                 ("requestHeaders", HeadersOf(run.Item)),
                 ("status", run.Item.StatusText),
+                ("graphErrorCode", ErrorCodeOf(run.Item)),
                 ("elapsedMs", run.Item.ElapsedMs.ToString())),
         };
     }
 
     /// <summary>
-    /// The delegated leg is claimed not to learn who has access: the signed-in person is a visitor on
-    /// the site, and an item's permission entries are not a visitor's to see.
+    /// The measurement the subcommand exists for: how much of an item's permission list this caller
+    /// gets to see.
     /// <para>
-    /// The claim is about what is revealed, not about the HTTP status, because Graph does not refuse
-    /// this call. It answers 200 with an empty collection - the entries are filtered to what the caller
-    /// may see, and a caller who may see none is told "success, nothing here". So a 403 and a 200 with
-    /// zero entries both satisfy the claim, and neither is a fault to be cleared by granting more.
+    /// Note that Graph does not refuse a caller who may see none of it. It answers 200 with an empty
+    /// collection - the entries are filtered to what the caller may see. So the count matters
+    /// independently of the status, and the two are recorded separately.
     /// </para>
     /// </summary>
     private static Observation PermissionsObservation(ModeRun run)
     {
-        var expectsSuccess = run.Mode == ProbeMode.AppOnly;
-        var claim = expectsSuccess
-            ? $"{run.Mode.Display()}: the file's permission list is readable"
-            : $"{run.Mode.Display()}: the permission list does not reveal the file's permission entries";
+        var subject = $"{run.Mode.Display()}: the file's permission list";
 
         if (run.Permissions is null)
         {
-            return Observation.NotRun(claim, "the item was never resolved, so the permission list was never requested");
+            return Observation.NotRun(subject, "the item was never resolved, so the permission list was never requested");
         }
 
         var observed = run.Permissions.IsSuccess
@@ -422,16 +434,12 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
               (run.PrincipalKinds.Count == 0 ? "none" : string.Join(", ", run.PrincipalKinds))
             : $"{run.Permissions.StatusText} {ErrorCodeOf(run.Permissions)}".Trim();
 
-        if (!expectsSuccess && run.Permissions.IsSuccess && run.PermissionEntryCount == 0)
+        if (run.Permissions.IsSuccess && run.PermissionEntryCount == 0)
         {
-            observed += " - Graph answered success with an empty list rather than refusing";
+            observed += " - an empty list, not a refusal";
         }
 
-        var held = expectsSuccess
-            ? run.Permissions.IsSuccess
-            : !run.Permissions.IsSuccess || run.PermissionEntryCount is null or 0;
-
-        return new Observation(claim, observed, held ? Verdict.Ok : Verdict.Failed)
+        return Observation.Measured(subject, observed) with
         {
             Details = Details(
                 run,
@@ -445,20 +453,18 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         };
     }
 
-    /// <summary>The headline: the two identities did not see the same thing at the same moment.</summary>
+    /// <summary>The two identities, set side by side, at the same moment, on the same item.</summary>
     private static Observation ContrastObservation(ModeRun appOnly, ModeRun delegatedRun)
     {
-        const string Claim = "app-only and delegated do not see the same permission surface for this file";
+        const string Subject = "app-only vs delegated: the same file's permission surface";
 
         if (appOnly.Permissions is null && delegatedRun.Permissions is null)
         {
-            return Observation.NotRun(Claim, "neither mode reached the permission list");
+            return Observation.NotRun(Subject, "neither mode reached the permission list");
         }
 
         var appStatus = Status(appOnly.Permissions);
         var delegatedStatus = Status(delegatedRun.Permissions);
-        var differs = appStatus != delegatedStatus ||
-                      appOnly.PermissionEntryCount != delegatedRun.PermissionEntryCount;
 
         var observed =
             $"app-only {appStatus} / entries {appOnly.PermissionEntryCount?.ToString() ?? "-"}; " +
@@ -472,7 +478,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
             observed += " - identical status, different contents: the status alone cannot tell a filtered list from an empty one";
         }
 
-        return new Observation(Claim, observed, differs ? Verdict.Ok : Verdict.Failed)
+        return Observation.Measured(Subject, observed) with
         {
             Details = new Dictionary<string, string?>
             {

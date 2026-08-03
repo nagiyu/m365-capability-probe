@@ -4,8 +4,8 @@ using System.Text.Json.Serialization;
 namespace CapabilityProbe.Reporting;
 
 /// <summary>
-/// Writes the same report to <c>reports/</c> as JSON. Verdicts are serialised by name, so
-/// <c>NotRun</c> stays legible in the file and cannot be mistaken for a pass by a later reader.
+/// Writes the same report to <c>reports/</c> as JSON. The status is serialised by name, so
+/// <c>NotRun</c> stays legible in the file and cannot be mistaken for a measurement of zero.
 /// </summary>
 public sealed class JsonReportWriter(string outputDirectory)
 {
@@ -37,16 +37,15 @@ public sealed class JsonReportWriter(string outputDirectory)
             }),
             observations = report.Observations.Select(o => new
             {
-                claim = o.Claim,
+                subject = o.Subject,
                 observed = o.Observed,
-                verdict = o.Verdict,
+                status = o.Status,
                 details = o.Details,
             }),
             summary = new
             {
-                ok = report.Count(Verdict.Ok),
-                failed = report.Count(Verdict.Failed),
-                notRun = report.Count(Verdict.NotRun),
+                measured = report.Count(MeasurementStatus.Measured),
+                notRun = report.Count(MeasurementStatus.NotRun),
             },
         };
 

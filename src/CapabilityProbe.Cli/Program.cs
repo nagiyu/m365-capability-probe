@@ -111,7 +111,9 @@ public static class Program
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- auth");
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- access --FilePath=\"/drafts/q3.docx\"");
         writer.WriteLine();
-        writer.WriteLine("Exit codes: 0 every claim held, 1 a claim was contradicted, 2 something never ran,");
-        writer.WriteLine("            64 bad usage, 78 incomplete configuration, 130 cancelled.");
+        writer.WriteLine("Exit codes say whether the probe finished measuring, not whether the tenant behaved.");
+        writer.WriteLine("A refusal, an empty list and a token carrying nothing are all successful measurements.");
+        writer.WriteLine("  0 everything was measured, 2 something never ran,");
+        writer.WriteLine("  64 bad usage, 78 incomplete configuration, 130 cancelled.");
     }
 }
