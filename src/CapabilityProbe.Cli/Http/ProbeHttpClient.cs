@@ -69,8 +69,10 @@ public sealed record HttpObservation(
                 // wording. Parameter names rather than values, because a bare challenge names the
                 // tenant in its realm - which a CI log will mask, taking the shape of the answer with
                 // it. Names survive that; they are not anybody's secret.
+                // Short enough that the parameter list - the evidence for "no reason" - survives the
+                // column width. The header's name and full value are in the JSON either way.
                 return parameters.Count > 0
-                    ? $"{header} carries no reason (parameters: {string.Join(", ", parameters.Select(p => p.Key))})"
+                    ? $"no reason given ({string.Join(", ", parameters.Select(p => p.Key))})"
                     : $"{header}: {raw}";
             }
 
