@@ -296,12 +296,29 @@ app-only のトークンを先に取ってから止まり、コードと URL を
 事実ではありません。この 2 つは別の問いで、後者はずっと測られていませんでした。**アプリは、リソースが
 受け付けないクレームを持つことがあり、トークンを見てもそれは分かりません。**
 
-このサブコマンドは SharePoint 宛のトークンを実際に使います。app-only と委任の両方で、2 本。
+このサブコマンドは SharePoint 宛のトークンを実際に使います。app-only と委任の両方で、5 本。
 
 ```
-GET {SiteUrl}/_api/web              -> このサイトを読めるか
-GET {SiteUrl}/_api/web/currentuser  -> SharePoint は誰が呼んでいると思っているか
+Graph GET /v1.0/sites/{host}:{path}          -> 対照。アプリは生きているか
+SP    GET {SiteUrl}/_api/web                 -> このサイトを読めるか
+SP    GET {SiteUrl}/_api/web/currentuser     -> SharePoint は誰が呼んでいると思っているか
+SP    GET {SiteUrl}/_api/web/sitegroups      -> サイトのグループを列挙できるか
+SP    GET {SiteUrl}/_api/web/sitegroups({id})/users  -> その中身を列挙できるか
 ```
+
+**問いは同じ種類ではありません。** `/_api/web` は「トークンで扉が開くか」。`currentuser` は
+「SharePoint は誰が叩いていると思っているか」。`sitegroups` の 2 本は **「誰がアクセスを持っているかを
+列挙できるか」** で、これは別の能力です ― **サイトを読めることと、サイトの権限を読めることは同じ
+アクセス許可ではなく、片方だけ持つことがありえます。**
+
+**Graph の 1 本は対照です。** SharePoint 側が全滅して Graph が同じ実行・同じ資格情報で通るなら、
+アプリが壊れているのでもテナントに届かないのでもなく、**経路が違うだけ**だと言えます。これが無いと、
+拒否が並んだ画面は何とでも読めてしまいます。
+
+**`sitegroups({id})/users` はチェーンした呼び出し**で、直前の一覧から取った ID を使います。ここに 1 つ
+判断が要ります: **一覧を拒否された identity は ID を持てません。** そのまま `NotRun` にすると、
+「app-only はメンバーを列挙できるか」という肝心の問いが測れないまま消えるので、**もう片方の
+identity が見つけた ID を借ります**。レポートは **その ID がどちらの答えから来たか** を記録します。
 
 `Accept` は `application/json;odata=nometadata` です。SharePoint REST は指定しないと冗長な OData の
 封筒で返してくるためで、Graph 側の呼び出しとは違う値を送っています。**送ったヘッダは呼び出しごとに
@@ -311,13 +328,22 @@ GET {SiteUrl}/_api/web/currentuser  -> SharePoint は誰が呼んでいると思
 `currentuser` は SharePoint が認識している呼び出し元を返すので、2 つのレグがトークン エンドポイントの
 上だけでなく **リソースの上でも本当に別の identity なのか** がここで分かります。
 
-レポートは **Entra が発行したもの** と **SharePoint が honour したもの** を並べます。
+レポートは **Entra が発行したもの** と **各 API が honour したもの** を並べます。
 
 | 見るところ | 何が分かるか |
 | --- | --- |
-| What Entra issued | `roles` / `scp` / `aud` ― トークンが何を持っているか |
-| What SharePoint honoured | 各呼び出しのステータスと、返ってきた中身の一部 |
+| What Entra issued | audience ごとの `roles` / `scp` / `aud` ― トークンが何を持っているか |
+| What each API honoured | 各呼び出しのステータスと、返ってきた中身の一部 |
 | 対比の行 | `roles: Sites.Read.All -> 200 OK` のように、持っているものと起きたことを 1 行に |
+
+**ヘッダに `app roles` が出ます。** これは測定した時点で何が付与されていたかの記録です。アクセス許可を
+差し替えて何度か回すとき、**レポート自体が「どの構成で測ったか」を持つ**ので、順番を覚えていなくても
+束を比べられます。
+
+グループのメンバーは**数と `PrincipalType` だけ**を記録し、名前は出しません。列挙できるかどうかが
+測定対象であって、誰であるかは誰かのディレクトリです ― このレポートは、そのディレクトリが無い場所で
+読まれます。`PrincipalType` は SharePoint が返した生の数値のままにしてあります。ここで名前を付けると、
+**このツールの推測がサービスの答えとして出てしまう**ためです。
 
 **委任側が本題です。** このアプリ登録に SharePoint の委任アクセス許可は 1 つもないのに、委任トークンは
 SharePoint の audience と、Graph の付与を写した `scp` を持って返ってきます (上記参照)。**そういう経路で
@@ -365,6 +391,8 @@ src/CapabilityProbe.Cli/
   Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
                       ApiError ― Graph と SharePoint で形の違うエラーから code と message を取る
   Probes/             AuthProbe, AccessProbe, SharePointProbe
+                      SharePointResponses ― 応答の解釈。テナントが無いと実行されない部分なので
+                      呼び出し側と分けてある
   Reporting/          MeasurementStatus, Observation, ProbeReport, ConsoleReportWriter,
                       JsonReportWriter
 ```
