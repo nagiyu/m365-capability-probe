@@ -52,14 +52,26 @@ public sealed record HttpObservation(
                     continue;
                 }
 
-                var interesting = HeaderParameters(raw)
+                var parameters = HeaderParameters(raw).ToList();
+
+                var interesting = parameters
                     .Where(p => wanted.Contains(p.Key, StringComparer.OrdinalIgnoreCase))
                     .Select(p => $"{p.Key}={p.Value}")
                     .ToList();
 
-                // Nothing recognised means the header is some shape not seen before. Better to hand
-                // back the whole thing than to report that a service which explained itself did not.
-                return interesting.Count > 0 ? string.Join("; ", interesting) : raw;
+                if (interesting.Count > 0)
+                {
+                    return string.Join("; ", interesting);
+                }
+
+                // The header is there and says nothing about why. That is a different finding from
+                // "no header at all", and a different one again from "unreadable", so it gets its own
+                // wording. Parameter names rather than values, because a bare challenge names the
+                // tenant in its realm - which a CI log will mask, taking the shape of the answer with
+                // it. Names survive that; they are not anybody's secret.
+                return parameters.Count > 0
+                    ? $"{header} carries no reason (parameters: {string.Join(", ", parameters.Select(p => p.Key))})"
+                    : $"{header}: {raw}";
             }
 
             return null;
