@@ -82,7 +82,11 @@ jobs:
             exit 0
           fi
 
-          printf '%s' "$PFX_BASE64" | base64 -d > "$RUNNER_TEMP/probe.pfx"
+          # Whitespace is stripped first: base64 wrapped at 76 characters is the same value as base64
+          # on one line, and which one lands in the secret depends on which tool produced it.
+          # A PEM-style BEGIN/END block is not handled - those lines are not whitespace, and a
+          # certificate that decodes to nothing would be worse than one that fails here.
+          printf '%s' "$PFX_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/probe.pfx"
           echo "PROBE_CLIENTCERTIFICATEPATH=$RUNNER_TEMP/probe.pfx" >> "$GITHUB_ENV"
           echo "Wrote a $(wc -c < "$RUNNER_TEMP/probe.pfx") byte certificate file."
           echo "If it is not a PKCS#12 file, or the password is wrong, the report says so as a"

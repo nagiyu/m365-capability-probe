@@ -341,10 +341,18 @@ base64 を **ランナーの一時ディレクトリに書き出してから、�
 ツール側の入力は 1 つのまま、コードの経路も 1 つのままです。
 
 ```bash
-# 登録する値の作り方
-base64 -w0 probe.pfx        # Linux / macOS (macOS は -w0 不要)
-certutil -encode probe.pfx probe.b64   # Windows。ヘッダ行を取り除いて 1 行にする
+# Linux / macOS (macOS は -w0 不要)
+base64 -w0 probe.pfx | pbcopy   # あるいは > probe.b64
 ```
+
+```powershell
+# Windows
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("probe.pfx")) | Set-Clipboard
+```
+
+**`certutil -encode` は使わないでください。** `-----BEGIN CERTIFICATE-----` の行が付いた PEM 形式に
+なり、これは base64 ではありません。改行だけなら剥がしますが、この行は剥がしません ― 黙って別のものに
+なるより、ここで落ちるほうがましだからです。
 
 **シークレットを設定しなければ、証明書レグは「要求を出していない」として報告されます。** ジョブは
 失敗しません ― 証明書が無いこと自体が測定結果だからです。
