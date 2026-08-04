@@ -119,17 +119,17 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
         report.Subject["secret"] = secretSource.Identity;
         report.Subject["cert"] = certificateSource.Identity;
 
-        console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
+        console.WriteLine(delegatedSource.Enabled
+            ? "Establishing the delegated identity (device code)..."
+            : $"Not establishing a delegated identity: Identities is '{ProbeOptions.AppOnlyIdentities}'.");
         var signIn = await delegatedSource.SignInAsync(cancellationToken);
 
-        report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
+        report.Subject["signed in"] = delegatedSource.SignedInSummary;
 
-        if (!delegatedSource.IsSignedIn)
+        if (delegatedSource.IncompleteReason is { } incomplete)
         {
-            report.MarkIncomplete(
-                "the device code was printed but the sign-in was never completed, so the delegated half " +
-                "is empty for want of an identity rather than for want of an answer");
+            report.MarkIncomplete(incomplete);
         }
 
         var delegatedTokens = new Dictionary<ProbeAudience, TokenResult>

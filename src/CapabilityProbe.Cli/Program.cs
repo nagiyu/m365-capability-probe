@@ -55,6 +55,9 @@ public static class Program
                 ProbeOptionsLoader.SharePointCommand =>
                     await RunSharePointAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.AclCommand =>
+                    await RunAclAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -84,6 +87,12 @@ public static class Program
         return await new SharePointProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunAclAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new AclProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -110,12 +119,22 @@ public static class Program
         writer.WriteLine("  access      read every file's permission list as the app and as a person, in one run");
         writer.WriteLine("  sharepoint  spend the SharePoint token against SharePoint REST, every way: what Entra");
         writer.WriteLine("              issued, next to what the resource does about it");
+        writer.WriteLine("  acl         can a page of items' permissions be fetched in one call instead of one");
+        writer.WriteLine("              call per item? three candidate routes against the one-at-a-time baseline");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
         writer.WriteLine();
         writer.WriteLine("  TenantId ClientId ClientSecret SiteUrl FilePaths DelegatedUserHint");
         writer.WriteLine("  ClientCertificatePath ClientCertificatePassword   (optional)");
+        writer.WriteLine("  Identities                                       (optional: all | app-only)");
+        writer.WriteLine();
+        writer.WriteLine("Identities=app-only leaves the delegated leg alone: no device code is printed and");
+        writer.WriteLine("nothing is asked of the identity provider on a person's behalf. Its rows still appear,");
+        writer.WriteLine("as not run, saying that is what the run was asked for - and the run still exits 0,");
+        writer.WriteLine("because a sign-in nobody attempted is not a sign-in that failed. Use it where there is");
+        writer.WriteLine("no person at a browser, or where the sign-in is being refused for reasons this tool is");
+        writer.WriteLine("not measuring.");
         writer.WriteLine();
         writer.WriteLine("Point ClientCertificatePath at a .pfx holding a certificate and its private key, and");
         writer.WriteLine("'auth' and 'sharepoint' add a third identity: the same app registration, with the same");

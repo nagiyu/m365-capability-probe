@@ -64,6 +64,31 @@ public sealed class ProbeOptions
     /// <summary>Sign-in name the operator should use for the delegated (device code) leg.</summary>
     public string DelegatedUserHint { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Which identities a run should establish: <c>all</c>, or <c>app-only</c> to leave the delegated
+    /// leg alone.
+    /// <para>
+    /// The delegated leg needs a person at a browser, and there are places a run happens where there
+    /// is no person - and times when the sign-in is refused for reasons that have nothing to do with
+    /// what the app can reach. Narrowing the run is better than a report full of rows that failed for
+    /// a reason the report is not about.
+    /// </para>
+    /// <para>
+    /// It narrows the run; it does not hide it. The delegated rows still appear, as not run, saying
+    /// that this is what the run was asked for. A leg that vanishes from a report reads as a leg that
+    /// was never worth measuring.
+    /// </para>
+    /// </summary>
+    public string Identities { get; set; } = string.Empty;
+
+    /// <summary>The two values <see cref="Identities"/> accepts, for validation and for messages.</summary>
+    public const string AllIdentities = "all";
+    public const string AppOnlyIdentities = "app-only";
+
+    /// <summary>True unless the run was explicitly narrowed to the application's own identities.</summary>
+    public bool RunDelegated =>
+        !string.Equals(Identities.Trim(), AppOnlyIdentities, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Host name taken from <see cref="SiteUrl"/>. Used to build the SharePoint scope.</summary>
     public string SiteHost =>
         Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;

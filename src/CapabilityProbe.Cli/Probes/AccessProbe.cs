@@ -84,20 +84,20 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         console.WriteLine("Establishing the application identity (client credentials)...");
         var appOnlyToken = await AppOnlyTokenSource.WithSecret(options).GetTokenAsync(ProbeAudience.Graph, cancellationToken);
 
-        console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
+        console.WriteLine(delegatedSource.Enabled
+            ? "Establishing the delegated identity (device code)..."
+            : $"Not establishing a delegated identity: Identities is '{ProbeOptions.AppOnlyIdentities}'.");
         var delegatedToken = await delegatedSource.SignInAsync(cancellationToken);
 
         // Who actually signed in, not who was configured to. The delegated half of every number below
         // is a statement about that account, so a report that names the hint instead is asserting
         // something it never measured.
-        report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
+        report.Subject["signed in"] = delegatedSource.SignedInSummary;
 
-        if (!delegatedSource.IsSignedIn)
+        if (delegatedSource.IncompleteReason is { } incomplete)
         {
-            report.MarkIncomplete(
-                "the device code was printed but the sign-in was never completed, so the delegated half " +
-                "is empty for want of an identity rather than for want of an answer");
+            report.MarkIncomplete(incomplete);
         }
 
         var appOnly = await ResolveIdentityAsync(ProbeMode.AppOnly, appOnlyToken, calls, cancellationToken);
@@ -245,83 +245,16 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
     /// Counts the permission entries and names the kinds of principal that appear in them.
     /// A refused response yields no count at all rather than a zero - "we were not allowed to look"
     /// and "we looked and there was nothing" are different observations.
+    /// <para>
+    /// The counting itself lives in <see cref="PermissionSummary"/>, shared with <c>acl</c>. That
+    /// subcommand checks a bulk answer against the one this one produces, and two copies of the same
+    /// idea would let a difference between the copies masquerade as a difference between the APIs.
+    /// </para>
     /// </summary>
     private static (int? Count, IReadOnlyList<string> Kinds) SummarisePermissions(HttpObservation observation)
     {
-        if (!observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
-        {
-            return (null, []);
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(observation.Body);
-            if (!document.RootElement.TryGetProperty("value", out var value) || value.ValueKind != JsonValueKind.Array)
-            {
-                return (null, []);
-            }
-
-            var kinds = new SortedSet<string>(StringComparer.Ordinal);
-            var count = 0;
-
-            foreach (var entry in value.EnumerateArray())
-            {
-                count++;
-
-                CollectIdentitySetKinds(entry, "grantedToV2", kinds);
-                CollectIdentitySetKinds(entry, "grantedTo", kinds);
-                CollectIdentityListKinds(entry, "grantedToIdentitiesV2", kinds);
-                CollectIdentityListKinds(entry, "grantedToIdentities", kinds);
-
-                if (entry.TryGetProperty("link", out var link) && link.ValueKind == JsonValueKind.Object)
-                {
-                    var scope = link.TryGetProperty("scope", out var s) ? s.GetString() : null;
-                    kinds.Add(scope is null ? "link" : $"link:{scope}");
-                }
-
-                if (entry.TryGetProperty("invitation", out var invitation) && invitation.ValueKind == JsonValueKind.Object)
-                {
-                    kinds.Add("invitation");
-                }
-            }
-
-            return (count, kinds.ToList());
-        }
-        catch (JsonException)
-        {
-            return (null, []);
-        }
-    }
-
-    private static void CollectIdentitySetKinds(JsonElement entry, string propertyName, SortedSet<string> kinds)
-    {
-        if (entry.TryGetProperty(propertyName, out var identitySet) && identitySet.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var kind in identitySet.EnumerateObject())
-            {
-                if (kind.Value.ValueKind == JsonValueKind.Object)
-                {
-                    kinds.Add(kind.Name);
-                }
-            }
-        }
-    }
-
-    private static void CollectIdentityListKinds(JsonElement entry, string propertyName, SortedSet<string> kinds)
-    {
-        if (entry.TryGetProperty(propertyName, out var list) && list.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var identitySet in list.EnumerateArray())
-            {
-                foreach (var kind in identitySet.EnumerateObject())
-                {
-                    if (kind.Value.ValueKind == JsonValueKind.Object)
-                    {
-                        kinds.Add(kind.Name);
-                    }
-                }
-            }
-        }
+        var entries = AclResponses.Permissions(observation);
+        return entries is null ? (null, []) : (entries.Count, entries.PrincipalKinds);
     }
 
     private static ProbeTable BuildIdentityTable(Identity appOnly, Identity delegatedRun)
