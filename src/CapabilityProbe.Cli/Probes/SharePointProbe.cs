@@ -152,10 +152,14 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
         // report says which one did - because an identity that was refused the listing cannot produce
         // an ID of its own, and leaving its membership call unmeasured would drop the very question
         // this run is asking. Borrowing the ID lets all of them be asked the same thing.
-        var (groupId, groupSource) = PickGroupId(legs);
-        report.Subject["group id"] = groupId is null
-            ? "(no group id - no identity could list the site groups)"
-            : $"{groupId} (discovered by {groupSource})";
+        var (group, groupSource) = PickGroup(legs);
+        var groupId = group?.Id;
+
+        // Named, not just numbered. Whose membership was read decides what "0 members" means, and the
+        // group this lands on is whichever one the site lists first - not a choice anyone made.
+        report.Subject["group"] = group is null
+            ? "(none - no identity could list the site groups)"
+            : $"id {group.Value.Id}, \"{group.Value.Title ?? "(untitled)"}\" (discovered by {groupSource})";
 
         if (groupId is not null)
         {
@@ -257,18 +261,18 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     }
 
     /// <summary>
-    /// A site group ID for the membership call, and which identity's answer it came from. The legs are
-    /// tried in order, so an identity that listed the groups itself supplies its own ID; the borrow is
-    /// the fallback for the ones that were refused the listing.
+    /// A site group for the membership call, and which identity's answer it came from. The legs are
+    /// tried in order, so an identity that listed the groups itself supplies its own answer; the borrow
+    /// is the fallback for the ones that were refused the listing.
     /// </summary>
-    private static (string? Id, string Source) PickGroupId(IReadOnlyList<Leg> legs)
+    private static ((string Id, string? Title)? Group, string Source) PickGroup(IReadOnlyList<Leg> legs)
     {
         foreach (var leg in legs)
         {
-            var id = SharePointResponses.FirstGroupId(leg.Find(SiteGroupsStep));
-            if (id is not null)
+            var group = SharePointResponses.FirstGroup(leg.Find(SiteGroupsStep));
+            if (group is not null)
             {
-                return (id, leg.Mode.Display());
+                return (group, leg.Mode.Display());
             }
         }
 
