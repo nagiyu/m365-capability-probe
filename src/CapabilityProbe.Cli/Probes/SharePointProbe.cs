@@ -44,6 +44,12 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     private sealed record Step(string Name, ProbeAudience Audience, string Url, Func<HttpObservation, string> Summarise)
     {
         public string Accept => Audience == ProbeAudience.SharePoint ? SharePointAccept : "application/json";
+
+        /// <summary>
+        /// True for the calls that repeat once per site group. They get a table of their own, because
+        /// a list that mixes them in with the four calls made once apiece buries the four.
+        /// </summary>
+        public bool PerGroup { get; init; }
     }
 
     private sealed class Leg
@@ -61,8 +67,18 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     private const string WebStep = "SP GET /_api/web";
     private const string CurrentUserStep = "SP GET /_api/web/currentuser";
     private const string SiteGroupsStep = "SP GET /_api/web/sitegroups";
-    private const string GroupUsersStep = "SP GET /_api/web/sitegroups({id})/users";
+    private const string NoGroupStep = "SP GET /_api/web/sitegroups({id})/users";
     private const string GraphStep = "Graph GET /sites/{host}:{path}";
+
+    /// <summary>
+    /// How many of a site's groups this run will ask about. A bound is needed - a site can have
+    /// hundreds - and it is set high enough that a test site is covered whole. Whenever it bites, the
+    /// report says so: a truncated answer that does not admit it reads as a complete one.
+    /// </summary>
+    private const int MaxGroups = 25;
+
+    private static string GroupUsersStep(SharePointResponses.SiteGroup group) =>
+        $"SP GET /_api/web/sitegroups({group.Id})/users  {group.Title ?? "(untitled)"}";
 
     public async Task<ProbeReport> RunAsync(CancellationToken cancellationToken)
     {
@@ -148,26 +164,39 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             }
         }
 
-        // The chained call. Whichever identity managed to list the groups supplies the ID, and the
+        // The chained calls. Whichever identity managed to list the groups supplies the list, and the
         // report says which one did - because an identity that was refused the listing cannot produce
-        // an ID of its own, and leaving its membership call unmeasured would drop the very question
-        // this run is asking. Borrowing the ID lets all of them be asked the same thing.
-        var (group, groupSource) = PickGroup(legs);
-        var groupId = group?.Id;
+        // an ID of its own, and leaving its membership calls unmeasured would drop the very question
+        // this run is asking. Borrowing the list lets all of them be asked the same things.
+        var (groups, groupSource) = PickGroups(legs);
+        var measured = (groups ?? []).Take(MaxGroups).ToList();
 
-        // Named, not just numbered. Whose membership was read decides what "0 members" means, and the
-        // group this lands on is whichever one the site lists first - not a choice anyone made.
-        report.Subject["group"] = group is null
-            ? "(none - no identity could list the site groups)"
-            : $"id {group.Value.Id}, \"{group.Value.Title ?? "(untitled)"}\" (discovered by {groupSource})";
+        report.Subject["groups"] = GroupsHeader(groups, measured, groupSource);
 
-        if (groupId is not null)
+        if (groups is not null && groups.Count > measured.Count)
+        {
+            // A bound the reader did not choose has to be visible, or a partial answer reads as a
+            // complete one. The console line is not enough - it is not in the report.
+            console.WriteLine(
+                $"Only the first {MaxGroups} of {groups.Count} site groups will be asked about.");
+        }
+
+        if (measured.Count == 0)
+        {
+            var step = new Step(NoGroupStep, ProbeAudience.SharePoint, "(not built)", _ => "");
+            foreach (var leg in legs)
+            {
+                leg.Results.Add((step, null));
+            }
+        }
+
+        foreach (var group in measured)
         {
             var step = new Step(
-                GroupUsersStep,
+                GroupUsersStep(group),
                 ProbeAudience.SharePoint,
-                $"{siteUrl}/_api/web/sitegroups({groupId})/users",
-                SharePointResponses.Users);
+                $"{siteUrl}/_api/web/sitegroups({group.Id})/users",
+                SharePointResponses.Users) { PerGroup = true };
 
             console.WriteLine($"{step.Name} as every identity...");
             foreach (var leg in legs)
@@ -175,17 +204,10 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                 await RunStepAsync(leg, step, cancellationToken);
             }
         }
-        else
-        {
-            var step = new Step(GroupUsersStep, ProbeAudience.SharePoint, "(not built)", _ => "");
-            foreach (var leg in legs)
-            {
-                leg.Results.Add((step, null));
-            }
-        }
 
         report.Add(BuildHoldsTable(legs));
         report.Add(BuildHonoursTable(legs));
+        report.Add(BuildMembershipTable(legs, measured));
         report.Add(BuildCallTable(legs));
 
         foreach (var leg in legs)
@@ -265,18 +287,51 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     /// tried in order, so an identity that listed the groups itself supplies its own answer; the borrow
     /// is the fallback for the ones that were refused the listing.
     /// </summary>
-    private static ((string Id, string? Title)? Group, string Source) PickGroup(IReadOnlyList<Leg> legs)
+    private static (IReadOnlyList<SharePointResponses.SiteGroup>? Groups, string Source) PickGroups(
+        IReadOnlyList<Leg> legs)
     {
         foreach (var leg in legs)
         {
-            var group = SharePointResponses.FirstGroup(leg.Find(SiteGroupsStep));
-            if (group is not null)
+            // The first readable listing wins, including one that turns out to be empty. A site with
+            // no groups is an answer; falling through to another leg would make it look like a refusal.
+            var groups = SharePointResponses.AllGroups(leg.Find(SiteGroupsStep));
+            if (groups is not null)
             {
-                return (group, leg.Mode.Display());
+                return (groups, leg.Mode.Display());
             }
         }
 
         return (null, "nobody");
+    }
+
+    /// <summary>
+    /// Which groups this run asked about, how many there were, and whose listing they came from.
+    /// <para>
+    /// The count is stated even when nothing was dropped, because "6 of 6" and "25 of 120" have to be
+    /// told apart at a glance, and a header that only appears when something went wrong trains a
+    /// reader to assume its absence means completeness.
+    /// </para>
+    /// </summary>
+    private static string GroupsHeader(
+        IReadOnlyList<SharePointResponses.SiteGroup>? all,
+        IReadOnlyList<SharePointResponses.SiteGroup> measured,
+        string source)
+    {
+        if (all is null)
+        {
+            return "(unknown - no identity could read a listing of the site groups)";
+        }
+
+        if (all.Count == 0)
+        {
+            return $"none - {source} listed the site groups and there are no groups on this site";
+        }
+
+        var coverage = measured.Count == all.Count
+            ? $"all {all.Count}"
+            : $"{measured.Count} of {all.Count} - {all.Count - measured.Count} NOT asked about";
+
+        return $"{coverage}, listed by {source}: {string.Join(", ", measured.Select(g => g.Display))}";
     }
 
     private static string EscapePath(string path) =>
@@ -313,7 +368,9 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     {
         var rows = new List<IReadOnlyList<string?>>();
 
-        foreach (var (step, _) in legs[0].Results)
+        // The per-group calls are left out here on purpose: they have a table of their own, and there
+        // are as many of them as the site has groups.
+        foreach (var (step, _) in legs[0].Results.Where(r => !r.Step.PerGroup))
         {
             foreach (var leg in legs)
             {
@@ -330,8 +387,57 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
         }
 
         return new ProbeTable(
-            "What each API honoured",
+            "What each API honoured (the per-group calls have their own table below)",
             ["call", "mode", "status", "what came back", "ms"],
+            rows);
+    }
+
+    /// <summary>
+    /// Every group's membership, every identity, in one grid.
+    /// <para>
+    /// This is the table the other ones cannot be: a refusal that is uniform across a site's groups and
+    /// one that varies group by group look identical when only one group was asked about. The groups an
+    /// administrator created sit next to the ones the service made for itself, so an empty answer can be
+    /// read against its neighbours rather than on its own.
+    /// </para>
+    /// <para>
+    /// The last column records what each identity's own listing held, repeated on every row. It is the
+    /// answer to "whose list is this": the IDs came from one identity, and an identity that saw a
+    /// different number of groups was asked about somebody else's.
+    /// </para>
+    /// </summary>
+    private static ProbeTable BuildMembershipTable(
+        IReadOnlyList<Leg> legs,
+        IReadOnlyList<SharePointResponses.SiteGroup> groups)
+    {
+        var rows = new List<IReadOnlyList<string?>>();
+
+        foreach (var group in groups)
+        {
+            foreach (var leg in legs)
+            {
+                var observation = leg.Find(GroupUsersStep(group));
+                var listed = SharePointResponses.GroupCount(leg.Find(SiteGroupsStep));
+
+                rows.Add(new[]
+                {
+                    group.Id,
+                    group.Title ?? "(untitled)",
+                    leg.Mode.Display(),
+                    observation is null ? "NotRun" : observation.StatusText,
+                    observation is null
+                        ? ""
+                        : observation.IsSuccess
+                            ? SharePointResponses.Users(observation)
+                            : SharePointResponses.Refusal(observation),
+                    listed?.ToString() ?? "could not list",
+                });
+            }
+        }
+
+        return new ProbeTable(
+            "Group membership, every group by every identity",
+            ["id", "group", "mode", "status", "what came back", "groups this identity listed"],
             rows);
     }
 
@@ -421,7 +527,7 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             return Observation.NotRun(
                 subject,
                 step.Url == "(not built)"
-                    ? "no site group ID was available, so the membership URL was never built"
+                    ? "there was no group ID to build a membership URL from - the 'groups' header says why"
                     : token.Requested
                         ? $"no {step.Audience.Display()} token was issued for this mode: {token.ErrorCode}"
                         : $"this identity never asked for a token: {token.ErrorDetail}");

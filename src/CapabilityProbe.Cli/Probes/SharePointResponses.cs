@@ -97,17 +97,34 @@ public static class SharePointResponses
             : $"{members.Count} members (PrincipalType {string.Join(", ", kinds)})";
     }
 
+    /// <summary>One site group, as much of it as is needed to ask about its membership and say whose.</summary>
+    public sealed record SiteGroup(string Id, string? Title)
+    {
+        public string Display => $"{Id} \"{Title ?? "(untitled)"}\"";
+    }
+
     /// <summary>
-    /// The first site group in a listing - its ID for building the membership call, and its title.
+    /// Every site group in a listing - each one's ID for building a membership call, and its title.
     /// <para>
-    /// The title travels with the ID because a membership result is meaningless without knowing whose
-    /// membership it is. A site's groups are not interchangeable: some are the ones an administrator
-    /// created and populated, and some are bookkeeping SharePoint generated for itself. "0 members" is
-    /// an ordinary fact about the second kind and a surprising one about the first, and a report that
-    /// gave only a number would let a reader take one for the other.
+    /// All of them rather than one, because choosing one is a prediction about where the answer lives,
+    /// and this probe does not make those. It made this one once by accident: it took whichever group
+    /// the site happened to list first, that turned out to be bookkeeping SharePoint had generated for
+    /// itself, and its emptiness was very nearly read as a fact about the site's groups in general.
+    /// Asking about all of them turns "which group" from a choice into a constant.
+    /// </para>
+    /// <para>
+    /// The title travels with the ID because a membership count is meaningless without knowing whose
+    /// membership it is. A site's groups are not interchangeable: some an administrator created and
+    /// filled, some the service made for its own purposes. "0 members" is unremarkable for the second
+    /// kind and surprising for the first.
     /// </para>
     /// </summary>
-    public static (string Id, string? Title)? FirstGroup(HttpObservation? observation)
+    /// <remarks>
+    /// Null and empty mean different things here, as they do everywhere else in this tool: null is
+    /// "there was no listing to read", empty is "the listing was read and the site has no groups".
+    /// Collapsing them would let a refusal be reported as a site with nothing in it.
+    /// </remarks>
+    public static IReadOnlyList<SiteGroup>? AllGroups(HttpObservation? observation)
     {
         if (observation is null || !observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
         {
@@ -122,25 +139,29 @@ public static class SharePointResponses
                 return null;
             }
 
+            var groups = new List<SiteGroup>();
             foreach (var entry in value.EnumerateArray())
             {
                 if (entry.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.Number)
                 {
-                    return (
+                    groups.Add(new SiteGroup(
                         id.GetRawText(),
                         entry.TryGetProperty("Title", out var title) && title.ValueKind == JsonValueKind.String
                             ? title.GetString()
-                            : null);
+                            : null));
                 }
             }
 
-            return null;
+            return groups;
         }
         catch (JsonException)
         {
             return null;
         }
     }
+
+    /// <summary>How many groups a readable listing held, or null when there was no listing to count.</summary>
+    public static int? GroupCount(HttpObservation? observation) => AllGroups(observation)?.Count;
 
     /// <summary>What the service said about a refusal: its own code, or failing that the headers.</summary>
     public static string Refusal(HttpObservation observation)
