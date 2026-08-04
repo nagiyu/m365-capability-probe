@@ -81,8 +81,38 @@ public static class ProbeOptionsLoader
             "application (client) ID of the app registration");
         Require(problems, "ClientSecret", options.ClientSecret, NeedsTenant,
             "client secret; keep it in user-secrets, not in a committed file");
-        Require(problems, "ProtectedFilePath", options.ProtectedFilePath, ConsumeOnly,
-            "path to a protected file to open; inside the container this is under /work/samples");
+        // consume takes its file from one of two places and never both: a path on this machine, or a
+        // path inside the site's document library. The second exists because a run can happen where
+        // there is nobody to hand a file over - and because which file is being opened is what a run
+        // is about, which makes it an input rather than something stored alongside the credentials.
+        var hasLocalFile = !string.IsNullOrWhiteSpace(options.ProtectedFilePath);
+        var hasSiteFile = !string.IsNullOrWhiteSpace(options.ProtectedSiteFile);
+
+        if (!hasLocalFile && !hasSiteFile)
+        {
+            problems.Add(new ConfigurationProblem(
+                "ProtectedFilePath / ProtectedSiteFile",
+                "neither is set - 'consume' needs a protected file, either a path on this machine " +
+                "(inside the container, under /work/samples) or a path inside the site's document library",
+                ConsumeOnly));
+        }
+        else if (hasLocalFile && hasSiteFile)
+        {
+            problems.Add(new ConfigurationProblem(
+                "ProtectedFilePath / ProtectedSiteFile",
+                "both are set, and there is no reading of that which does not quietly ignore one of them",
+                ConsumeOnly));
+        }
+
+        if (hasSiteFile && !options.ProtectedSiteFile.StartsWith('/'))
+        {
+            problems.Add(new ConfigurationProblem(
+                "ProtectedSiteFile",
+                $"must start with '/': '{options.ProtectedSiteFile}' (expected e.g. /probe.docx). It is " +
+                "relative to the root of the site's default document library and does not include the library's name",
+                ConsumeOnly));
+        }
+
         Require(problems, "DelegatedUserEmails", options.DelegatedUserEmails, ConsumeOnly,
             "one or more addresses to put in DelegatedUserEmail, separated by '|'; a leg with the value unset is always added");
 
@@ -95,7 +125,11 @@ public static class ProbeOptionsLoader
                 "neither is set, and 'consume' needs one of them to authenticate as the app",
                 ConsumeOnly));
         }
-        Require(problems, "SiteUrl", options.SiteUrl, NeedsTenant,
+        // consume normally needs no site at all. It does once its file is named as living in one, and
+        // then a missing SiteUrl stops it just as surely as it stops the others.
+        string[] siteUrlBlocks = hasSiteFile ? [.. NeedsTenant, ConsumeCommand] : NeedsTenant;
+
+        Require(problems, "SiteUrl", options.SiteUrl, siteUrlBlocks,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
         // Only when there is a delegated leg to name an account for. A run narrowed to the app's own
         // identities has no use for it, and a setting that blocks a run it takes no part in is noise.
@@ -126,7 +160,7 @@ public static class ProbeOptionsLoader
                 problems.Add(new ConfigurationProblem(
                     "SiteUrl",
                     $"not an absolute https URL: '{options.SiteUrl}' (expected https://<host>/sites/<name>)",
-                    NeedsTenant));
+                    siteUrlBlocks));
             }
         }
 

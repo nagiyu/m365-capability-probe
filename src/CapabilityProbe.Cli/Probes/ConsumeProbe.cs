@@ -1,7 +1,9 @@
+using System.Text.Json;
 using Azure.Core;
 using Azure.Identity;
 using CapabilityProbe.Auth;
 using CapabilityProbe.Configuration;
+using CapabilityProbe.Http;
 using CapabilityProbe.Reporting;
 using Microsoft.InformationProtection;
 using Microsoft.InformationProtection.File;
@@ -28,16 +30,46 @@ namespace CapabilityProbe.Probes;
 /// opened and what licence came back with it - the plaintext is not the answer to anything here, and
 /// producing it would make this a different tool.
 /// </para>
+/// <para>
+/// The file itself comes from one of two places: a path on this machine, or a path inside the site's
+/// document library, fetched with the app's own token before any leg runs and deleted afterwards.
+/// The second is there so that a run happening where nobody can hand a file over still has one, and
+/// so that the file being opened stays a run's input rather than something stored beside a credential.
+/// </para>
 /// </summary>
-public sealed class ConsumeProbe(ProbeOptions options, TextWriter console)
+public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, TextWriter console)
 {
     /// <summary>Identifies this tool to the protection service. It appears in that service's logs.</summary>
     private const string ApplicationName = "m365-capability-probe";
 
     private const string UnsetLeg = "(DelegatedUserEmail unset)";
 
+    private const string GraphBase = "https://graph.microsoft.com/v1.0";
+
     /// <summary>The SDK needs a concrete one; nothing here varies from its defaults.</summary>
     private sealed class ProbeFileExecutionState : FileExecutionState;
+
+    /// <summary>
+    /// Where the file came from, and what happened on the way. A source that could not be got hold of
+    /// is a state to report, not an exception: it says which step refused, and the legs below then say
+    /// they were never run rather than saying nothing.
+    /// </summary>
+    private sealed record FileSource
+    {
+        public required string Description { get; init; }
+
+        /// <summary>The file on disk, or null when there is nothing to open.</summary>
+        public string? Path { get; init; }
+
+        public string? Problem { get; init; }
+
+        /// <summary>True when this probe wrote the file and has to clean it up.</summary>
+        public bool IsTemporary { get; init; }
+
+        public long? Bytes { get; init; }
+
+        public IReadOnlyList<(string Step, HttpObservation Observation)> Calls { get; init; } = [];
+    }
 
     private sealed record LegResult
     {
@@ -61,7 +93,6 @@ public sealed class ConsumeProbe(ProbeOptions options, TextWriter console)
         var report = new ProbeReport("consume");
         report.Subject["tenant"] = options.TenantId;
         report.Subject["client"] = options.ClientId;
-        report.Subject["file"] = options.ProtectedFilePath;
 
         var credential = BuildCredential(out var credentialDescription);
         report.Subject["credential"] = credentialDescription;
@@ -75,38 +106,243 @@ public sealed class ConsumeProbe(ProbeOptions options, TextWriter console)
         var legs = options.DelegatedUsers.Append(UnsetLeg).ToList();
         report.Subject["legs"] = string.Join(", ", legs);
 
-        if (!File.Exists(options.ProtectedFilePath))
+        var source = await GetFileAsync(credential, cancellationToken);
+        report.Subject["file"] = source.Description;
+
+        try
         {
-            report.Add(Observation.NotRun(
+            foreach (var (step, observation) in source.Calls)
+            {
+                report.Add(FetchObservation(step, observation));
+            }
+
+            if (source.Path is null)
+            {
+                report.Add(Observation.NotRun("the protected file", source.Problem!));
+                report.Finish();
+                return report;
+            }
+
+            report.Add(Observation.Measured(
                 "the protected file",
-                $"no file at '{options.ProtectedFilePath}', so nothing could be opened as anyone"));
+                $"{source.Bytes?.ToString() ?? "?"} bytes at hand, from {source.Description}"));
+
+            var consent = new MipConsentDelegate(console);
+            var results = new List<LegResult>();
+
+            foreach (var leg in legs)
+            {
+                console.WriteLine($"Opening the file as {leg}...");
+                results.Add(await OpenAsync(source.Path, leg, credential, consent, cancellationToken));
+            }
+
+            report.Add(BuildTable(results));
+            report.Add(BuildRightsTable(results));
+
+            foreach (var result in results)
+            {
+                report.Add(LegObservation(result));
+            }
+
+            report.Add(ContrastObservation(results));
             report.Finish();
             return report;
         }
-
-        var consent = new MipConsentDelegate(console);
-        var results = new List<LegResult>();
-
-        foreach (var leg in legs)
+        finally
         {
-            console.WriteLine($"Opening the file as {leg}...");
-            results.Add(await OpenAsync(leg, credential, consent, cancellationToken));
+            // What was fetched is somebody's file. It exists for the length of a run and no longer,
+            // and a run that ends badly is exactly when that matters most.
+            if (source is { IsTemporary: true, Path: not null })
+            {
+                Delete(source.Path);
+            }
         }
-
-        report.Add(BuildTable(results));
-        report.Add(BuildRightsTable(results));
-
-        foreach (var result in results)
-        {
-            report.Add(LegObservation(result));
-        }
-
-        report.Add(ContrastObservation(results));
-        report.Finish();
-        return report;
     }
 
+    /// <summary>
+    /// Puts the protected file on disk, from wherever it was said to be. Every HTTP call it makes is
+    /// returned alongside the result, because a file that never arrived is a measurement about this
+    /// app's reach - the same measurement <c>access</c> makes, taken here for a different reason.
+    /// </summary>
+    private async Task<FileSource> GetFileAsync(TokenCredential credential, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(options.ProtectedSiteFile))
+        {
+            var path = options.ProtectedFilePath;
+            var exists = File.Exists(path);
+
+            return new FileSource
+            {
+                Description = $"{path} (this machine)",
+                Path = exists ? path : null,
+                Bytes = exists ? new FileInfo(path).Length : null,
+                Problem = exists ? null : $"no file at '{path}', so nothing could be opened as anyone",
+            };
+        }
+
+        var description = $"{options.ProtectedSiteFile} in {options.SiteUrl}";
+        console.WriteLine($"Fetching {options.ProtectedSiteFile} from the site as the application...");
+
+        var calls = new List<(string Step, HttpObservation Observation)>();
+
+        string accessToken;
+        try
+        {
+            var token = await credential.GetTokenAsync(
+                new TokenRequestContext(["https://graph.microsoft.com/.default"]),
+                cancellationToken);
+            accessToken = token.Token;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new FileSource
+            {
+                Description = description,
+                Problem = $"no Graph token was issued to fetch the file: {ex.GetType().Name} - {FirstLine(ex.Message)}",
+            };
+        }
+
+        // Same two hops as 'access': the site URL becomes an ID, then the path becomes an item ID
+        // under it. Graph's path addressing takes one colon segment, so the two cannot be chained.
+        var relativePath = options.SiteServerRelativePath;
+        var siteUrl = string.IsNullOrEmpty(relativePath)
+            ? $"{GraphBase}/sites/{options.SiteHost}"
+            : $"{GraphBase}/sites/{options.SiteHost}:{EscapePath(relativePath)}";
+
+        var site = await http.GetAsync(siteUrl, accessToken, cancellationToken);
+        calls.Add(("resolve site", site));
+
+        if (ReadStringProperty(site, "id") is not { } siteId)
+        {
+            return new FileSource
+            {
+                Description = description,
+                Calls = calls,
+                Problem = $"the site did not resolve ({site.StatusText} {ApiError.Code(site)}".TrimEnd() +
+                          "), so the file was never looked for",
+            };
+        }
+
+        var itemUrl = $"{GraphBase}/sites/{siteId}/drive/root:{EscapePath(options.ProtectedSiteFile)}";
+        var item = await http.GetAsync(itemUrl, accessToken, cancellationToken);
+        calls.Add(("resolve item", item));
+
+        if (ReadStringProperty(item, "id") is not { } itemId)
+        {
+            return new FileSource
+            {
+                Description = description,
+                Calls = calls,
+                Problem = $"the file did not resolve ({item.StatusText} {ApiError.Code(item)}".TrimEnd() +
+                          $"). A caller who may not see a file is told it does not exist, so this is also what a mistyped path looks like",
+            };
+        }
+
+        // The name matters: the SDK decides how to read a file from its extension, so a downloaded
+        // copy called anything else would be a different measurement.
+        var name = ReadStringProperty(item, "name") ?? options.ProtectedSiteFile.Split('/').Last();
+        var directory = Path.Combine(Path.GetTempPath(), $"capability-probe-{Guid.NewGuid():n}");
+        Directory.CreateDirectory(directory);
+        var destination = Path.Combine(directory, name);
+
+        var content = await http.DownloadAsync(
+            $"{GraphBase}/sites/{siteId}/drive/items/{itemId}/content",
+            accessToken,
+            destination,
+            cancellationToken);
+        calls.Add(("download content", content));
+
+        if (content.DownloadedBytes is not { } bytes)
+        {
+            Delete(destination);
+            return new FileSource
+            {
+                Description = description,
+                Calls = calls,
+                IsTemporary = true,
+                Problem = $"the content was not returned ({content.StatusText} {ApiError.Code(content)}".TrimEnd() +
+                          "), so there was nothing to open",
+            };
+        }
+
+        return new FileSource
+        {
+            Description = description,
+            Path = destination,
+            IsTemporary = true,
+            Bytes = bytes,
+            Calls = calls,
+        };
+    }
+
+    /// <summary>Escapes each segment but keeps the separators, so '/my drafts/q3.docx' stays a path.</summary>
+    private static string EscapePath(string path) =>
+        string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
+
+    private static string? ReadStringProperty(HttpObservation observation, string propertyName)
+    {
+        if (!observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(observation.Body);
+            return document.RootElement.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Deletes the copy this probe made, and the directory it was alone in. A failure to clean up is
+    /// not something to end a run over, but it is not nothing either, so it is said out loud.
+    /// </summary>
+    private void Delete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            var directory = Path.GetDirectoryName(path);
+            if (directory is not null && Directory.Exists(directory) && Directory.GetFileSystemEntries(directory).Length == 0)
+            {
+                Directory.Delete(directory);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            console.WriteLine($"Could not remove the downloaded copy at {path}: {ex.Message}");
+        }
+    }
+
+    private static Observation FetchObservation(string step, HttpObservation observation) =>
+        Observation.Measured(
+            $"fetching the file: {step}",
+            observation.DownloadedBytes is { } bytes
+                ? $"{observation.StatusText}, {bytes} bytes"
+                : $"{observation.StatusText} {ApiError.Code(observation)}".TrimEnd()) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["url"] = observation.Url,
+                ["status"] = observation.StatusText,
+                ["graphErrorCode"] = ApiError.Code(observation),
+                ["downloadedBytes"] = observation.DownloadedBytes?.ToString(),
+                ["elapsedMs"] = observation.ElapsedMs.ToString(),
+            },
+        };
+
     private async Task<LegResult> OpenAsync(
+        string filePath,
         string leg,
         TokenCredential credential,
         MipConsentDelegate consent,
@@ -166,8 +402,8 @@ public sealed class ConsumeProbe(ProbeOptions options, TextWriter console)
             var engine = await profile.AddEngineAsync(engineSettings);
 
             var handler = await engine.CreateFileHandlerAsync(
-                options.ProtectedFilePath,
-                options.ProtectedFilePath,
+                filePath,
+                filePath,
                 isAuditDiscoveryEnabled: false,
                 fileExecutionState: new ProbeFileExecutionState(),
                 isGetSensitivityLabelAuditDiscoveryEnabled: false);

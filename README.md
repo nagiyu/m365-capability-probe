@@ -164,6 +164,15 @@ Export-PfxCertificate    -Cert $cert -FilePath probe.pfx -Password (Read-Host -A
 | `ClientCertificatePassword` | (任意) その `.pfx` のパスワード。無ければ空のまま |
 | `Identities` | (任意) `all`（既定）または `app-only` |
 
+`consume` だけが使うキーが 4 つあります。
+
+| キー | 内容 |
+| --- | --- |
+| `ProtectedSiteFile` | 開く保護済みファイルの、**ライブラリ内のパス**。例 `/probe.docx`。`SiteUrl` が要る |
+| `ProtectedFilePath` | 開く保護済みファイルの、**このマシン上のパス**。上と**同時には設定できない** |
+| `DelegatedUserEmails` | `DelegatedUserEmail` に入れるアドレス。`\|` 区切りで複数。**未設定のレグは常に 1 本足される** |
+| `MipIdentityEmail` | (任意) `Identity` をここに固定する。空なら `Identity` は `DelegatedUserEmail` と一緒に動く |
+
 **`Identities=app-only` は委任レグを丸ごと見送ります。** デバイス コードは表示されず、人の代理としては
 ID プロバイダーに何も訊きません。`DelegatedUserHint` も要求されなくなります（使う相手がいないので）。
 
@@ -249,6 +258,9 @@ Subcommand readiness:
 dotnet run --project src/CapabilityProbe.Cli -- auth
 dotnet run --project src/CapabilityProbe.Cli -- access
 dotnet run --project src/CapabilityProbe.Cli -- sharepoint
+dotnet run --project src/CapabilityProbe.Cli -- acl
+dotnet run --project src/CapabilityProbe.Cli -- mip       # Linux のみ。設定は要らない
+dotnet run --project src/CapabilityProbe.Cli -- consume    # Linux のみ
 ```
 
 任意のキーは実行ごとに上書きできます。
@@ -404,7 +416,6 @@ app-only 側が 4 件見えているのと、同じアイテムの、同じ瞬�
 | `PROBE_CLIENTSECRET` | `ClientSecret` |
 | `PROBE_CLIENTCERTIFICATE` | (任意) `.pfx` を **base64 にしたもの** |
 | `PROBE_CLIENTCERTIFICATEPASSWORD` | (任意) その `.pfx` のパスワード |
-| `PROBE_PROTECTEDFILE` | (任意) `consume` で開く**保護済みファイルを base64 にしたもの** |
 
 証明書だけは扱いが違います。シークレットは文字列で、ツールが要るのはファイルなので、ワークフローは
 base64 を **ランナーの一時ディレクトリに書き出してから、そのパスを他の設定と同じ経路で渡します**。
@@ -427,13 +438,18 @@ base64 -w0 probe.pfx | pbcopy   # あるいは > probe.b64
 **シークレットを設定しなければ、証明書レグは「要求を出していない」として報告されます。** ジョブは
 失敗しません ― 証明書が無いこと自体が測定結果だからです。
 
-`PROBE_PROTECTEDFILE` も同じ扱いです。**ファイルもシークレットは文字列なので、base64 を書き出して
-パスだけ渡します。** 書き出すときのファイル名は dispatch の入力 (`protected_file_name`) で決めます ―
-**拡張子は SDK が見る**ので、`.docx` を `.bin` で渡すと別の答えが出ます。
+**`consume` で開くファイルはシークレットではありません。** シークレットに置くのは実行ごとに変わらない
+値だけで、**どのファイルを開くのかは、その実行が何を測るのかそのもの**だからです。ファイルは
+**SharePoint のライブラリに置いて、パスだけを dispatch の入力 (`protected_site_file`) で渡します** ―
+`FilePaths` と同じ形です。アプリは app-only の Graph トークンでそれを取ってきて、実行が終われば
+消します。取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) もレポートに測定として並びます。
 
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("probe-miku-only.docx")) | Set-Clipboard
-```
+**Graph が保護されたままのバイト列を返すのか、復号済みを返すのかは確かめていません。** 復号済みで
+返ってくればこの実験は成立しませんが、**プローブが `protected: no` と報告するのでそうと分かります** ―
+それはそれで所見です。
+
+手元のファイルを開きたいときは `ProtectedFilePath` がそのまま残っています。**両方は設定できません**
+(片方が黙って無視される読み方しか無いため、設定エラーになります)。
 
 **`consume` と `mip` は Actions で完結します。** ランナーは Ubuntu 24.04 で、SDK が link している
 3 つのパッケージだけワークフローが入れます (`mip` が実行時に確認している一覧と同じもの)。
@@ -650,6 +666,42 @@ JSON にはアイテム 1 件あたりの呼び出し回数も入ります。**�
 4 件で 5 回対 2 回は小さな差ですが、**差が開き続ける**ことのほうが所見です。詳しくは
 [docs/findings.md](docs/findings.md) の所見 8。
 
+### `mip`
+
+**このビルドから MIP SDK に届くか**を訊きます。**設定もテナントも要りません** ― 訊いている相手は
+このマシンであって M365 ではないからです。`.so` が 5 つ揃っているかを見て、SDK が link している
+システム ライブラリを 1 つずつ `NativeLibrary.TryLoad` にかけ、最後に `MIP.Initialize` を呼びます。
+
+1 つずつ読み込むのは、**SDK の失敗が `LoadLibrary failed with error code 0` としか言わない**からです ―
+それは**落ちたライブラリの名前は言いますが、見つけられなかったライブラリの名前は言いません**。
+
+### `consume`
+
+**1 つの保護済みファイルを、`DelegatedUserEmail` の値だけ変えて何度も開き**、保護サービスが何を
+発行したかを並べます。**設定したアドレスごとに 1 本、それに加えて値を未設定にしたレグが必ず 1 本**
+走ります。**未設定のレグが無いと、「値が効いている」と「値は必須だが読まれていない」が同じ形に
+見えます。**
+
+```bash
+dotnet run --project src/CapabilityProbe.Cli -- consume \
+  --ProtectedSiteFile=/probe.docx \
+  --DelegatedUserEmails="a@example.com|b@example.com" \
+  --MipIdentityEmail=a@example.com
+```
+
+- **どのアドレスが権利を持っているはずか、ツールは知りません。** 全部走らせて返ってきたものを
+  報告します。どれが対照だったのかは、日付と理由を持てる散文の側の話です
+- **`MipIdentityEmail` を設定すると `Identity` が止まり、動くのは `DelegatedUserEmail` だけ**に
+  なります。設定しなければ 2 つは一緒に動き、レグ間の差は**ペアについての事実**になります。
+  どちらで走ったかはレポートの先頭に出ます
+- **ライセンスのキャッシュはメモリだけ**です。ディスクに残ると、後のレグが前のレグの判断で
+  答えてしまい、レグ間の比較そのものが壊れます
+- **復号したストリームは長さしか読みません。** 中身はどこにも書き出しません
+- ファイルは実行の終わりに消します（取得した場合）
+
+`ProtectedSiteFile` を使うと、取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) も
+**測定として並びます**。取れなければレグは `NotRun` になり、理由が残ります。
+
 ## 出力の読み方
 
 レポートの各行は 3 つのものを持ちます。
@@ -691,7 +743,9 @@ src/CapabilityProbe.Cli/
                       AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
   Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
                       ApiError ― Graph と SharePoint で形の違うエラーから code と message を取る
-  Probes/             AuthProbe, AccessProbe, SharePointProbe, AclProbe
+  Auth/MipAuthDelegate ― SDK が要求してきた authority と resource をそのまま記録する
+                      (URL を決めるのがツールでなくなるので、何を訊かれたかは測定になる)
+  Probes/             AuthProbe, AccessProbe, SharePointProbe, AclProbe, MipProbe, ConsumeProbe
                       SharePointResponses / AclResponses ― 応答の解釈。テナントが無いと実行され
                       ない部分なので呼び出し側と分けてある
                       PermissionSummary ― 権限エントリの数え方。access と acl で共有している

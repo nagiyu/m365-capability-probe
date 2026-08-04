@@ -89,8 +89,26 @@ public sealed class ProbeOptions
     public bool RunDelegated =>
         !string.Equals(Identities.Trim(), AppOnlyIdentities, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Path to a protected file the <c>consume</c> subcommand should try to open.</summary>
+    /// <summary>Path to a protected file on this machine that <c>consume</c> should try to open.</summary>
     public string ProtectedFilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Path to a protected file inside the site's default document library, in the same shape as
+    /// <see cref="FilePaths"/> - <c>/probe.docx</c> for a file sitting directly in the library.
+    /// <c>consume</c> fetches it with the app's own token before any leg runs, and deletes it after.
+    /// <para>
+    /// The alternative to handing the file itself to a run. Which file is being opened is what a run
+    /// is about, and things a run is about are its inputs; a stored credential is for the values that
+    /// never change between runs. Putting the file where the app can already read it turns a variable
+    /// blob into a path.
+    /// </para>
+    /// <para>
+    /// It also means the fetch is measured. Whether the bytes arrive still protected is not something
+    /// this asserts - the legs below report what the file turned out to be, and a file that arrived
+    /// decrypted is reported as unprotected rather than opened as if it were not.
+    /// </para>
+    /// </summary>
+    public string ProtectedSiteFile { get; set; } = string.Empty;
 
     /// <summary>
     /// Addresses to put in <c>FileEngineSettings.DelegatedUserEmail</c>, one leg each, separated by

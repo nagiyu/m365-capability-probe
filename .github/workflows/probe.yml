@@ -51,11 +51,11 @@ on:
         type: string
         required: false
         default: ""
-      protected_file_name:
-        description: "consume only. File name to give the PROBE_PROTECTEDFILE secret when it is written out - the extension matters to the SDK."
+      protected_site_file:
+        description: "consume only. Path to the protected file in the site's document library, e.g. /probe-miku-only.docx. Needs site_url."
         type: string
         required: false
-        default: "protected.docx"
+        default: ""
 
 permissions:
   contents: read
@@ -120,25 +120,6 @@ jobs:
           echo "If it is not a PKCS#12 file, or the password is wrong, the report says so as a"
           echo "not-run row with the reason. It does not fail the job: that is a measurement too."
 
-      # Same shape as the certificate: a secret is a string, the SDK needs a file, so the base64 is
-      # written out here and only the path is handed over. The extension is an input because the SDK
-      # decides how to open a file partly by looking at it.
-      - name: Materialise the protected file
-        env:
-          FILE_BASE64: ${{ secrets.PROBE_PROTECTEDFILE }}
-          FILE_NAME: ${{ inputs.protected_file_name }}
-        run: |
-          set -eu
-          if [ -z "${FILE_BASE64:-}" ]; then
-            echo "No PROBE_PROTECTEDFILE secret is set."
-            echo "'consume' will report that there was no file to open. Every other subcommand ignores this."
-            exit 0
-          fi
-
-          printf '%s' "$FILE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/$FILE_NAME"
-          echo "PROBE_PROTECTEDFILEPATH=$RUNNER_TEMP/$FILE_NAME" >> "$GITHUB_ENV"
-          echo "Wrote a $(wc -c < "$RUNNER_TEMP/$FILE_NAME") byte file as $FILE_NAME."
-
       # The Information Protection SDK is native code, and these are what its libraries link against -
       # read out of the binaries with objdump, and checked at run time by the 'mip' subcommand. Only
       # the two subcommands that touch the SDK pay for this.
@@ -163,6 +144,12 @@ jobs:
           if [ "$SUBCOMMAND" = "mip" ] || [ "$SUBCOMMAND" = "consume" ]; then
             echo "$SUBCOMMAND has no delegated leg: no device code will be printed, and nobody"
             echo "needs to watch this log."
+            if [ "$SUBCOMMAND" = "consume" ]; then
+              echo
+              echo "The file is not a secret: it is fetched from the site's document library with the"
+              echo "app's own token, at the path given as protected_site_file, and deleted when the run"
+              echo "ends. Which file is being opened is what this run is about, so it is an input."
+            fi
           elif [ "$IDENTITIES" = "all" ]; then
             echo "The next step requests app-only tokens first, then stops and prints a device code."
             echo "Open the URL it prints, enter the code, and sign in as: $HINT"
@@ -193,6 +180,7 @@ jobs:
           PROBE_IDENTITIES: ${{ inputs.identities }}
           PROBE_DELEGATEDUSEREMAILS: ${{ inputs.delegated_user_emails }}
           PROBE_MIPIDENTITYEMAIL: ${{ inputs.mip_identity_email }}
+          PROBE_PROTECTEDSITEFILE: ${{ inputs.protected_site_file }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
         run: |
