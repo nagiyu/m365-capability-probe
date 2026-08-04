@@ -452,3 +452,7 @@ appsettings.local.json
 
 # Probe output
 reports/
+
+# Protected documents handed to the MIP path. Encrypted or not, they are somebody's file, and the
+# point of putting one here is to open it - so this directory is where it stays.
+samples/
