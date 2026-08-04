@@ -107,5 +107,10 @@ jobs:
           echo "A refusal seen here and not seen locally is not automatically a permission finding:"
           echo "this ran from a GitHub-hosted runner, so the source IP and device differ from your"
           echo "machine, and a conditional access policy can refuse on those grounds alone."
+          echo
+          echo "Also: Actions masks its secrets in this log, and a service can put one of them inside"
+          echo "a value the probe measured - SharePoint names the tenant in its WWW-Authenticate realm."
+          echo "Masked text is replaced after the line is written, so a table whose columns no longer"
+          echo "line up is the sign that it happened. Run locally to read a value that comes back ***."
 
           exit $status

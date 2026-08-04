@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.RegularExpressions;
 
 namespace CapabilityProbe.Http;
 
@@ -30,11 +31,59 @@ public sealed record HttpObservation(
 
     public bool IsSuccess => StatusCode is >= 200 and < 300;
 
-    /// <summary>Whatever the service said about why it refused, from the headers rather than the body.</summary>
-    public string? RefusalDiagnostic =>
-        ResponseHeaders.TryGetValue("x-ms-diagnostics", out var diagnostics) ? diagnostics
-        : ResponseHeaders.TryGetValue("WWW-Authenticate", out var challenge) ? challenge
-        : null;
+    /// <summary>
+    /// Whatever the service said about why it refused, taken from the headers rather than the body.
+    /// <para>
+    /// These headers are mostly boilerplate with one useful sentence buried in them - a
+    /// <c>WWW-Authenticate</c> challenge spends its first hundred characters naming the realm, the
+    /// resource and its trusted issuers before it gets to <c>error=</c>. Printing it whole means the
+    /// reason is the part that gets truncated away, so the named parameters that carry meaning are
+    /// pulled out and the rest is dropped.
+    /// </para>
+    /// </summary>
+    public string? RefusalDiagnostic
+    {
+        get
+        {
+            foreach (var (header, wanted) in RefusalHeaders)
+            {
+                if (!ResponseHeaders.TryGetValue(header, out var raw) || string.IsNullOrWhiteSpace(raw))
+                {
+                    continue;
+                }
+
+                var interesting = HeaderParameters(raw)
+                    .Where(p => wanted.Contains(p.Key, StringComparer.OrdinalIgnoreCase))
+                    .Select(p => $"{p.Key}={p.Value}")
+                    .ToList();
+
+                // Nothing recognised means the header is some shape not seen before. Better to hand
+                // back the whole thing than to report that a service which explained itself did not.
+                return interesting.Count > 0 ? string.Join("; ", interesting) : raw;
+            }
+
+            return null;
+        }
+    }
+
+    private static readonly (string Header, string[] Wanted)[] RefusalHeaders =
+    [
+        ("x-ms-diagnostics", ["reason", "error_category", "error", "error_description"]),
+        ("WWW-Authenticate", ["error", "error_description"]),
+        ("x-ms-ags-diagnostic", ["reason", "error", "error_description"]),
+    ];
+
+    /// <summary>Pulls <c>name="value"</c> pairs out of a header, which is how both shapes carry theirs.</summary>
+    private static IEnumerable<KeyValuePair<string, string>> HeaderParameters(string header)
+    {
+        foreach (Match match in HeaderParameterPattern.Matches(header))
+        {
+            yield return new KeyValuePair<string, string>(match.Groups[1].Value, match.Groups[2].Value);
+        }
+    }
+
+    private static readonly Regex HeaderParameterPattern =
+        new(@"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*""([^""]*)""", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     public string StatusText => StatusCode is null
         ? $"(no response: {TransportError})"
