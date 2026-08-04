@@ -293,6 +293,7 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                     leg.Mode.Display(),
                     token.StateText,
                     token.Claims?.GrantSummary() ?? (token.Succeeded ? "(claims unreadable)" : ""),
+                    token.Claims?.CredentialClassText ?? "",
                     token.Claims?.Audience ?? "",
                 });
             }
@@ -300,7 +301,7 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
 
         return new ProbeTable(
             "What Entra issued (claims are read, not verified - this tool is not their audience)",
-            ["audience", "mode", "token", "granted", "aud claim"],
+            ["audience", "mode", "token", "granted", "how it authenticated", "aud claim"],
             rows);
     }
 
@@ -399,6 +400,8 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                 ["audClaim"] = token.Claims?.Audience,
                 ["roles"] = token.Claims is null ? null : string.Join(' ', token.Claims.Roles),
                 ["scp"] = token.Claims is null ? null : string.Join(' ', token.Claims.Scopes),
+                ["credentialClassClaim"] = token.Claims?.CredentialClassClaim,
+                ["credentialClass"] = token.Claims?.CredentialClass,
                 ["signedInAs"] = token.Claims?.SignedInAs,
             },
         };

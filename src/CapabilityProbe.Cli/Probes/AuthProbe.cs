@@ -160,6 +160,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                     mode.Display(),
                     result is null ? "NotRun" : result.StateText,
                     result?.Claims?.GrantSummary() ?? (result?.Succeeded == true ? "(claims unreadable)" : ""),
+                    result?.Claims?.CredentialClassText ?? "",
                     result?.Claims?.Audience ?? "",
                     result?.Claims?.SignedInAs ?? "",
                     result?.ErrorCode ?? "",
@@ -171,7 +172,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 
         return new ProbeTable(
             "Token requests in detail (token claims are read, not verified - this tool is not their audience)",
-            ["audience", "mode", "token", "granted", "aud claim", "upn claim", "error code", "ms", "error detail"],
+            ["audience", "mode", "token", "granted", "how it authenticated", "aud claim", "upn claim", "error code", "ms", "error detail"],
             rows);
     }
 
@@ -213,6 +214,8 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                 ["audClaim"] = result.Claims?.Audience,
                 ["roles"] = result.Claims is null ? null : string.Join(' ', result.Claims.Roles),
                 ["scp"] = result.Claims is null ? null : string.Join(' ', result.Claims.Scopes),
+                ["credentialClassClaim"] = result.Claims?.CredentialClassClaim,
+                ["credentialClass"] = result.Claims?.CredentialClass,
                 ["signedInAs"] = result.Claims?.SignedInAs,
                 ["errorCode"] = result.ErrorCode,
                 ["errorDetail"] = result.ErrorDetail,
