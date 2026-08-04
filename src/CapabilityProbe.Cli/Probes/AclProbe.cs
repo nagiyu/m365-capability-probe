@@ -390,8 +390,20 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
     private static RouteResult Blocked(string route, Leg leg) =>
         new() { Route = route, Mode = leg.Mode, Blocked = leg.Blocked ?? "this identity could not be established" };
 
+    /// <summary>
+    /// Why a route produced no page. A refusal and a success whose body could not be read are
+    /// different things and used to print the same way - the second one arrived as
+    /// "200 OK: &lt;some diagnostic header&gt;", which reads like the service said no.
+    /// </summary>
     private static string Describe(HttpObservation observation)
     {
+        if (observation.IsSuccess)
+        {
+            return observation.BodyTruncated
+                ? $"{observation.StatusText}, but the probe cut the body short before it could be read"
+                : $"{observation.StatusText}, but the body held no collection this could read";
+        }
+
         var code = ApiError.Code(observation);
         var message = code.Length > 0 ? code : observation.RefusalDiagnostic ?? "no reason given";
         return $"{observation.StatusText}: {message}";
@@ -487,11 +499,23 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                 var onlyBaseline = baseline.PerItem.Keys.Count(k => !candidate.PerItem.ContainsKey(k));
                 var onlyCandidate = candidate.PerItem.Keys.Count(k => !baseline.PerItem.ContainsKey(k));
 
+                // Nothing on either side is not agreement. Two routes that both produced no ACL at
+                // all would otherwise be reported as saying the same thing, which they are - and it
+                // is the least informative true statement available.
+                var verdict = (baseline.PerItem.Count, candidate.PerItem.Count) switch
+                {
+                    (0, 0) => "nothing to compare - neither produced an ACL",
+                    (0, _) => "nothing to compare - one at a time produced no ACL",
+                    (_, 0) => "nothing to compare - the bulk route produced no ACL",
+                    _ when differ == 0 && onlyBaseline == 0 => "identical",
+                    _ => "differs",
+                };
+
                 rows.Add(new[]
                 {
                     route,
                     leg.Mode.Display(),
-                    differ == 0 && onlyBaseline == 0 ? "identical" : "differs",
+                    verdict,
                     same.ToString(),
                     differ.ToString(),
                     onlyBaseline.ToString(),

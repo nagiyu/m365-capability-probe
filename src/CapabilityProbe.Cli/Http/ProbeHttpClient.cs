@@ -29,6 +29,13 @@ public sealed record HttpObservation(
     public IReadOnlyDictionary<string, string> ResponseHeaders { get; init; } =
         new Dictionary<string, string>();
 
+    /// <summary>
+    /// True when the probe itself cut this body short. A body that will not parse is normally a fact
+    /// about the service; if this is set, it is a fact about the probe, and the two must never be
+    /// reported as the same thing.
+    /// </summary>
+    public bool BodyTruncated { get; init; }
+
     public bool IsSuccess => StatusCode is >= 200 and < 300;
 
     /// <summary>
@@ -110,7 +117,24 @@ public sealed record HttpObservation(
 /// </summary>
 public sealed class ProbeHttpClient : IDisposable
 {
-    private const int MaxRecordedBodyLength = 4000;
+    /// <summary>
+    /// A guard against a pathological response, not a display limit.
+    /// <para>
+    /// It used to be four thousand characters, which was chosen to keep the record readable - and it
+    /// was applied to the body the summarisers then had to parse. A listing longer than that arrived
+    /// cut in the middle of its JSON, failed to parse, and was reported as an answer that could not be
+    /// read. The probe was changing the measurement and then reporting the change as the finding.
+    /// </para>
+    /// <para>
+    /// Bodies are not written to the report - only counts, statuses and short summaries drawn from
+    /// them - so keeping a whole one costs nothing a reader ever sees. What needed shortening was the
+    /// record, and the record is shortened where it is written instead.
+    /// </para>
+    /// </summary>
+    private const int MaxBodyLength = 1_000_000;
+
+    /// <summary>Headers are a record, not something parsed, so they keep the short limit.</summary>
+    private const int MaxRecordedHeaderLength = 4000;
 
     /// <summary>
     /// Response headers worth keeping. An allow list rather than everything, because most of what a
@@ -173,11 +197,12 @@ public sealed class ProbeHttpClient : IDisposable
                 RequestHeaders: recordedHeaders,
                 StatusCode: (int)response.StatusCode,
                 ReasonPhrase: response.ReasonPhrase ?? ((HttpStatusCode)response.StatusCode).ToString(),
-                Body: Truncate(body),
+                Body: body.Length <= MaxBodyLength ? body : body[..MaxBodyLength],
                 ElapsedMs: stopwatch.ElapsedMilliseconds,
                 TransportError: null)
             {
                 ResponseHeaders = CollectHeaders(response),
+                BodyTruncated = body.Length > MaxBodyLength,
             };
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
@@ -211,8 +236,8 @@ public sealed class ProbeHttpClient : IDisposable
         return collected;
     }
 
-    private static string Truncate(string body) =>
-        body.Length <= MaxRecordedBodyLength ? body : body[..MaxRecordedBodyLength] + "...[truncated]";
+    private static string Truncate(string value) =>
+        value.Length <= MaxRecordedHeaderLength ? value : value[..MaxRecordedHeaderLength] + "...[truncated]";
 
     public void Dispose() => _http.Dispose();
 }
