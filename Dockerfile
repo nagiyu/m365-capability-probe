@@ -34,11 +34,14 @@ RUN dotnet restore M365CapabilityProbe.sln
 COPY . .
 RUN dotnet publish src/CapabilityProbe.Cli -c Release -o /app
 
-# Reports are written under the working directory. Mounting a volume here keeps them after the
-# container exits; without one they go with it, which for a measurement tool is the wrong default to
-# leave unsaid.
-WORKDIR /reports
-VOLUME /reports
+# The probe writes its JSON under <working directory>/reports, so the working directory is not itself
+# called reports - that produced /reports/reports. Mounting a volume on the inner path keeps the
+# files after the container exits; without one they go with it, which for a measurement tool is the
+# wrong default to leave unsaid.
+#
+#   docker run --rm -v "$PWD/reports:/work/reports" capability-probe mip
+WORKDIR /work
+VOLUME /work/reports
 
 ENTRYPOINT ["dotnet", "/app/capability-probe.dll"]
 CMD ["help"]

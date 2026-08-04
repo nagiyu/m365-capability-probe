@@ -77,7 +77,13 @@ MVP の制約は MVP のためのものでした。**外した理由と、外し
 ```bash
 docker build -t capability-probe .
 docker run --rm capability-probe mip
+
+# レポートを手元に残すなら
+docker run --rm -v "$PWD/reports:/work/reports" capability-probe mip
 ```
+
+**マウントしないとレポートはコンテナと一緒に消えます。** 表はログに出るので `mip` では困りませんが、
+テナントを測るサブコマンドでは JSON のほうが本体です。
 
 **`mip` はテナントも設定も要りません。** 訊いているのは「この環境でそもそも測れるのか」だけです。
 5 つのネイティブが置かれているか、それが link している 10 個のシステム ライブラリを読み込めるか、
