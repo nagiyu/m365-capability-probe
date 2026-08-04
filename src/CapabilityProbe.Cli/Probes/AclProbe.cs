@@ -125,17 +125,17 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             },
         };
 
-        console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
+        console.WriteLine(delegatedSource.Enabled
+            ? "Establishing the delegated identity (device code)..."
+            : $"Not establishing a delegated identity: Identities is '{ProbeOptions.AppOnlyIdentities}'.");
         var signIn = await delegatedSource.SignInAsync(cancellationToken);
 
-        report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
+        report.Subject["signed in"] = delegatedSource.SignedInSummary;
 
-        if (!delegatedSource.IsSignedIn)
+        if (delegatedSource.IncompleteReason is { } incomplete)
         {
-            report.MarkIncomplete(
-                "the device code was printed but the sign-in was never completed, so the delegated rows " +
-                "are empty for want of an identity rather than for want of an answer");
+            report.MarkIncomplete(incomplete);
         }
 
         legs.Add(new Leg

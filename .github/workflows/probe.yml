@@ -19,10 +19,20 @@ on:
         description: "SiteUrl - https://<host>/sites/<name>"
         type: string
         required: true
-      delegated_user_hint:
-        description: "DelegatedUserHint - the sign-in name the delegated leg should be completed with"
-        type: string
+      identities:
+        description: "Which identities to establish. 'all' needs a person to complete a device code in this log."
+        type: choice
+        options: [app-only, all]
+        default: app-only
         required: true
+      # Not marked required: a dispatch form cannot ask for it only when identities=all, and an
+      # app-only run has no delegated leg to name an account for. Left empty with identities=all,
+      # the probe stops on its own and says which key is missing.
+      delegated_user_hint:
+        description: "DelegatedUserHint - the sign-in name to complete the device code with (identities=all only)"
+        type: string
+        required: false
+        default: ""
       file_paths:
         description: "FilePaths - access only. Several allowed, separated by '|'. No library name. e.g. /a.docx|/sub/b.docx"
         type: string
@@ -93,11 +103,21 @@ jobs:
           echo "not-run row with the reason. It does not fail the job: that is a measurement too."
 
       - name: Say what to watch for
+        env:
+          IDENTITIES: ${{ inputs.identities }}
+          HINT: ${{ inputs.delegated_user_hint }}
         run: |
-          echo "The next step requests app-only tokens first, then stops and prints a device code."
-          echo "Open the URL it prints, enter the code, and sign in as: ${{ inputs.delegated_user_hint }}"
-          echo "Signing in as anyone else measures that person's reach instead. The report records"
-          echo "which account actually completed the sign-in, so a run is never silently about someone else."
+          set -eu
+          if [ "$IDENTITIES" = "all" ]; then
+            echo "The next step requests app-only tokens first, then stops and prints a device code."
+            echo "Open the URL it prints, enter the code, and sign in as: $HINT"
+            echo "Signing in as anyone else measures that person's reach instead. The report records"
+            echo "which account actually completed the sign-in, so a run is never silently about someone else."
+          else
+            echo "identities=app-only: no device code will be printed and nobody needs to watch this log."
+            echo "The delegated rows will appear as not run, saying that is what this run was asked for."
+            echo "That is a narrower run, not a failed one - it still exits 0."
+          fi
 
       - name: Probe
         # The delegated sign-in is the long pole. Bounded here so a timeout is attributed to the
@@ -115,6 +135,7 @@ jobs:
           PROBE_SITEURL: ${{ inputs.site_url }}
           PROBE_FILEPATHS: ${{ inputs.file_paths }}
           PROBE_DELEGATEDUSERHINT: ${{ inputs.delegated_user_hint }}
+          PROBE_IDENTITIES: ${{ inputs.identities }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
         run: |

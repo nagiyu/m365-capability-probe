@@ -66,8 +66,13 @@ public static class ProbeOptionsLoader
             "client secret; keep it in user-secrets, not in a committed file");
         Require(problems, "SiteUrl", options.SiteUrl, Everywhere,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
-        Require(problems, "DelegatedUserHint", options.DelegatedUserHint, Everywhere,
-            "sign-in name to use for the device code leg, shown on screen before sign-in");
+        // Only when there is a delegated leg to name an account for. A run narrowed to the app's own
+        // identities has no use for it, and a setting that blocks a run it takes no part in is noise.
+        if (options.RunDelegated)
+        {
+            Require(problems, "DelegatedUserHint", options.DelegatedUserHint, Everywhere,
+                "sign-in name to use for the device code leg, shown on screen before sign-in");
+        }
         Require(problems, "FilePaths", options.FilePaths, AccessOnly,
             "one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx");
 
@@ -92,6 +97,21 @@ public static class ProbeOptionsLoader
                     $"not an absolute https URL: '{options.SiteUrl}' (expected https://<host>/sites/<name>)",
                     Everywhere));
             }
+        }
+
+        // A typo here is not a small thing: it decides which identities the run establishes, so an
+        // unrecognised value silently falling back to "all" would produce a report about something
+        // other than what was asked for. Better to stop and say the word was not understood.
+        var identities = options.Identities.Trim();
+        if (identities.Length > 0 &&
+            !identities.Equals(ProbeOptions.AllIdentities, StringComparison.OrdinalIgnoreCase) &&
+            !identities.Equals(ProbeOptions.AppOnlyIdentities, StringComparison.OrdinalIgnoreCase))
+        {
+            problems.Add(new ConfigurationProblem(
+                "Identities",
+                $"'{options.Identities}' is not a value this understands - use " +
+                $"'{ProbeOptions.AllIdentities}' or '{ProbeOptions.AppOnlyIdentities}' (empty means all)",
+                Everywhere));
         }
 
         // A password with nothing to unlock is the shape a half-finished setup takes: the certificate

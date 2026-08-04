@@ -127,6 +127,14 @@ public static class Program
         writer.WriteLine();
         writer.WriteLine("  TenantId ClientId ClientSecret SiteUrl FilePaths DelegatedUserHint");
         writer.WriteLine("  ClientCertificatePath ClientCertificatePassword   (optional)");
+        writer.WriteLine("  Identities                                       (optional: all | app-only)");
+        writer.WriteLine();
+        writer.WriteLine("Identities=app-only leaves the delegated leg alone: no device code is printed and");
+        writer.WriteLine("nothing is asked of the identity provider on a person's behalf. Its rows still appear,");
+        writer.WriteLine("as not run, saying that is what the run was asked for - and the run still exits 0,");
+        writer.WriteLine("because a sign-in nobody attempted is not a sign-in that failed. Use it where there is");
+        writer.WriteLine("no person at a browser, or where the sign-in is being refused for reasons this tool is");
+        writer.WriteLine("not measuring.");
         writer.WriteLine();
         writer.WriteLine("Point ClientCertificatePath at a .pfx holding a certificate and its private key, and");
         writer.WriteLine("'auth' and 'sharepoint' add a third identity: the same app registration, with the same");

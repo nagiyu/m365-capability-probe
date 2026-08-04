@@ -62,18 +62,18 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         }
 
         var delegated = new DelegatedTokenSource(options, console);
-        console.WriteLine("Requesting delegated tokens (device code, on behalf of a person)...");
+        console.WriteLine(delegated.Enabled
+            ? "Requesting delegated tokens (device code, on behalf of a person)..."
+            : $"Not requesting delegated tokens: Identities is '{ProbeOptions.AppOnlyIdentities}'.");
         var signIn = await delegated.SignInAsync(cancellationToken);
 
         // Who actually signed in, not who was configured to. A run completed by the wrong account
         // measures that account's reach, and the report has to say so on its own months from now.
-        report.Subject["signed in"] = delegated.SignedInAs ?? "(nobody - sign-in did not complete)";
+        report.Subject["signed in"] = delegated.SignedInSummary;
 
-        if (!delegated.IsSignedIn)
+        if (delegated.IncompleteReason is { } incomplete)
         {
-            report.MarkIncomplete(
-                "the device code was printed but the sign-in was never completed, so the delegated column " +
-                "is empty for want of an identity rather than for want of an answer");
+            report.MarkIncomplete(incomplete);
         }
 
         if (signIn.Succeeded)

@@ -84,20 +84,20 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         console.WriteLine("Establishing the application identity (client credentials)...");
         var appOnlyToken = await AppOnlyTokenSource.WithSecret(options).GetTokenAsync(ProbeAudience.Graph, cancellationToken);
 
-        console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
+        console.WriteLine(delegatedSource.Enabled
+            ? "Establishing the delegated identity (device code)..."
+            : $"Not establishing a delegated identity: Identities is '{ProbeOptions.AppOnlyIdentities}'.");
         var delegatedToken = await delegatedSource.SignInAsync(cancellationToken);
 
         // Who actually signed in, not who was configured to. The delegated half of every number below
         // is a statement about that account, so a report that names the hint instead is asserting
         // something it never measured.
-        report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
+        report.Subject["signed in"] = delegatedSource.SignedInSummary;
 
-        if (!delegatedSource.IsSignedIn)
+        if (delegatedSource.IncompleteReason is { } incomplete)
         {
-            report.MarkIncomplete(
-                "the device code was printed but the sign-in was never completed, so the delegated half " +
-                "is empty for want of an identity rather than for want of an answer");
+            report.MarkIncomplete(incomplete);
         }
 
         var appOnly = await ResolveIdentityAsync(ProbeMode.AppOnly, appOnlyToken, calls, cancellationToken);
