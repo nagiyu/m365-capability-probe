@@ -389,27 +389,12 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
     /// </summary>
     private static string HeadersOf(HttpObservation observation) => string.Join(" | ", observation.RequestHeaders);
 
-    /// <summary>Graph puts its own code in the body; that code says more than the HTTP status alone.</summary>
-    private static string ErrorCodeOf(HttpObservation observation)
-    {
-        if (observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
-        {
-            return "";
-        }
+    /// <summary>The response headers that carry a reason. Graph uses these for refusals too.</summary>
+    private static string ResponseHeadersOf(HttpObservation observation) =>
+        string.Join(" | ", observation.ResponseHeaders.Select(h => $"{h.Key}: {h.Value}"));
 
-        try
-        {
-            using var document = JsonDocument.Parse(observation.Body);
-            return document.RootElement.TryGetProperty("error", out var error) &&
-                   error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String
-                ? code.GetString() ?? ""
-                : "";
-        }
-        catch (JsonException)
-        {
-            return "";
-        }
-    }
+    /// <summary>Graph puts its own code in the body; that code says more than the HTTP status alone.</summary>
+    private static string ErrorCodeOf(HttpObservation observation) => ApiError.Code(observation);
 
     private static Observation TokenObservation(Identity identity)
     {
@@ -460,6 +445,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
                 identity.Mode,
                 ("url", identity.Site.Url),
                 ("requestHeaders", HeadersOf(identity.Site)),
+                ("responseHeaders", ResponseHeadersOf(identity.Site)),
                 ("status", identity.Site.StatusText),
                 ("graphErrorCode", ErrorCodeOf(identity.Site)),
                 ("elapsedMs", identity.Site.ElapsedMs.ToString())),
@@ -495,6 +481,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
                 ("file", run.File),
                 ("url", run.Item.Url),
                 ("requestHeaders", HeadersOf(run.Item)),
+                ("responseHeaders", ResponseHeadersOf(run.Item)),
                 ("status", run.Item.StatusText),
                 ("graphErrorCode", ErrorCodeOf(run.Item)),
                 ("elapsedMs", run.Item.ElapsedMs.ToString())),
@@ -540,6 +527,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
                 ("file", run.File),
                 ("url", run.Permissions.Url),
                 ("requestHeaders", HeadersOf(run.Permissions)),
+                ("responseHeaders", ResponseHeadersOf(run.Permissions)),
                 ("status", run.Permissions.StatusText),
                 ("graphErrorCode", ErrorCodeOf(run.Permissions)),
                 ("entryCount", run.PermissionEntryCount?.ToString()),

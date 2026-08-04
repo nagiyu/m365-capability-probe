@@ -16,7 +16,7 @@ public static class Program
         var command = args.Length > 0 && !args[0].StartsWith('-') ? args[0].ToLowerInvariant() : null;
         var configArgs = args.Length > 0 ? args[1..] : [];
 
-        if (command is null or "help" || command is not (ProbeOptionsLoader.AuthCommand or ProbeOptionsLoader.AccessCommand))
+        if (command is null or "help" || !ProbeOptionsLoader.AllCommands.Contains(command))
         {
             WriteUsage(Console.Out);
             return command is null or "help" ? 0 : 64;
@@ -51,6 +51,9 @@ public static class Program
                 ProbeOptionsLoader.AccessCommand =>
                     await RunAccessAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.SharePointCommand =>
+                    await RunSharePointAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -72,6 +75,12 @@ public static class Program
     {
         using var http = new ProbeHttpClient();
         return await new AccessProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
+    private static async Task<ProbeReport> RunSharePointAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new SharePointProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
     /// <summary>
@@ -96,8 +105,10 @@ public static class Program
         writer.WriteLine("capability-probe - observe what one Entra app registration can reach in Microsoft 365.");
         writer.WriteLine();
         writer.WriteLine("Usage:");
-        writer.WriteLine("  auth     request a token for Graph, SharePoint and Azure RMS, as the app and as a person");
-        writer.WriteLine("  access   read every file's permission list as the app and as a person, in one run");
+        writer.WriteLine("  auth        request a token for Graph, SharePoint and Azure RMS, as the app and as a person");
+        writer.WriteLine("  access      read every file's permission list as the app and as a person, in one run");
+        writer.WriteLine("  sharepoint  spend the SharePoint token against SharePoint REST, both ways: what Entra");
+        writer.WriteLine("              issued, next to what the resource does about it");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
@@ -112,6 +123,7 @@ public static class Program
         writer.WriteLine("Example:");
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- auth");
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- access --FilePaths=\"/a.docx|/drafts/b.docx\"");
+        writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- sharepoint");
         writer.WriteLine();
         writer.WriteLine("Exit codes say whether the probe could do its job, not whether the tenant behaved.");
         writer.WriteLine("A refusal, an empty list, a 404 and a token carrying nothing are all measurements,");
