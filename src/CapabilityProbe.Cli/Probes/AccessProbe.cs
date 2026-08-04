@@ -563,20 +563,36 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         var appPermissions = appOnly.Blocked is not null ? "NotRun" : Status(appOnly.Permissions);
         var delegatedPermissions = delegatedRun.Blocked is not null ? "NotRun" : Status(delegatedRun.Permissions);
 
-        var observed =
-            $"app-only item {appItem} / permissions {appPermissions} / entries {appOnly.PermissionEntryCount?.ToString() ?? "-"}; " +
-            $"delegated item {delegatedItem} / permissions {delegatedPermissions} / entries {delegatedRun.PermissionEntryCount?.ToString() ?? "-"}";
+        // The whole point of this row has to survive a terminal column. Written short enough to read
+        // at a glance, with the long form kept alongside it for whoever reads the JSON.
+        var note = (appOnly.ItemId, delegatedRun.ItemId, delegatedRun.Item?.StatusCode) switch
+        {
+            (not null, null, 404) => "exists, but not to this caller",
 
-        // The two answers that look like facts about the file, and are not.
-        if (appOnly.ItemId is not null && delegatedRun.ItemId is null && delegatedRun.Item?.StatusCode == 404)
+            _ when appPermissions == delegatedPermissions &&
+                   appOnly.PermissionEntryCount != delegatedRun.PermissionEntryCount =>
+                "filtered, not empty",
+
+            _ => null,
+        };
+
+        var explanation = note switch
         {
-            observed += " - the file exists; the delegated caller is told it does not";
-        }
-        else if (appPermissions == delegatedPermissions &&
-                 appOnly.PermissionEntryCount != delegatedRun.PermissionEntryCount)
-        {
-            observed += " - identical status, different contents: the status alone cannot tell a filtered list from an empty one";
-        }
+            "exists, but not to this caller" =>
+                "the file exists and app-only reads it; the delegated caller is told it does not exist, " +
+                "which is the same answer a mistyped path gets",
+
+            "filtered, not empty" =>
+                "identical status, different contents: the status alone cannot tell a list filtered down " +
+                "to nothing from a file that is shared with nobody",
+
+            _ => null,
+        };
+
+        var observed =
+            $"app-only {Side(appOnly, appItem, appPermissions)}; " +
+            $"delegated {Side(delegatedRun, delegatedItem, delegatedPermissions)}" +
+            (note is null ? "" : $" - {note}");
 
         return Observation.Measured(subject, observed) with
         {
@@ -589,9 +605,16 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
                 ["delegatedPermissionsStatus"] = delegatedPermissions,
                 ["appOnlyEntryCount"] = appOnly.PermissionEntryCount?.ToString(),
                 ["delegatedEntryCount"] = delegatedRun.PermissionEntryCount?.ToString(),
+                ["note"] = explanation,
             },
         };
     }
+
+    /// <summary>One identity's answer for one file, compressed: how far it got, and how much it saw.</summary>
+    private static string Side(FileRun run, string itemStatus, string permissionsStatus) =>
+        run.ItemId is null
+            ? itemStatus
+            : $"{permissionsStatus}/{run.PermissionEntryCount?.ToString() ?? "-"}";
 
     private static IReadOnlyDictionary<string, string?> Details(ProbeMode mode, params (string Key, string? Value)[] extra)
     {
