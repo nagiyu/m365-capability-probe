@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Azure.Core;
-using Azure.Identity;
 using CapabilityProbe.Auth;
 using CapabilityProbe.Configuration;
 using CapabilityProbe.Http;
@@ -106,6 +105,15 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         var legs = options.DelegatedUsers.Append(UnsetLeg).ToList();
         report.Subject["legs"] = string.Join(", ", legs);
 
+        if (credential is null)
+        {
+            report.Add(Observation.NotRun(
+                "the application's own identity",
+                "there is nothing for the app to prove itself with, so no leg was attempted"));
+            report.Finish();
+            return report;
+        }
+
         var source = await GetFileAsync(credential, cancellationToken);
         report.Subject["file"] = source.Description;
 
@@ -118,6 +126,9 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
             if (source.Path is null)
             {
+                // The console grid clips a long cell, and this row's entire value is the reason.
+                // Written out here in full so the log carries it even where the table cannot.
+                console.WriteLine($"The file was not fetched: {source.Problem}");
                 report.Add(Observation.NotRun("the protected file", source.Problem!));
                 report.Finish();
                 return report;
@@ -195,10 +206,13 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Code first, prose after: this whole row is the reason, and a console cell is narrow
+            // enough that whatever leads is the only part a reader is guaranteed to see.
+            var (code, detail) = AuthErrorCode.Describe(ex);
             return new FileSource
             {
                 Description = description,
-                Problem = $"no Graph token was issued to fetch the file: {ex.GetType().Name} - {FirstLine(ex.Message)}",
+                Problem = $"{code}: {detail} - no Graph token, so the file was never fetched",
             };
         }
 
@@ -459,28 +473,34 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
     /// The app's own credential. A certificate is preferred when one is configured, because the
     /// protection service has already been measured treating the two differently elsewhere in this
     /// tool - and the report names which was used rather than leaving it to be guessed.
+    /// <para>
+    /// It is taken from <see cref="AppOnlyTokenSource"/> rather than built here. This method used to
+    /// build its own from the certificate's <em>path</em>, which meant a second, passwordless attempt
+    /// at a file the source had already opened with its password: the report printed the thumbprint
+    /// off the loaded certificate and then said the credential was unavailable. One place loads the
+    /// file, and everything else asks that place for what it made.
+    /// </para>
     /// </summary>
-    private TokenCredential BuildCredential(out string description)
+    private TokenCredential? BuildCredential(out string description)
     {
-        if (options.HasCertificate && File.Exists(options.ClientCertificatePath))
+        var certificate = AppOnlyTokenSource.WithCertificate(options);
+        if (certificate.Credential is { } certificateCredential)
         {
-            var source = AppOnlyTokenSource.WithCertificate(options);
-            if (!source.IsUnavailable)
-            {
-                description = $"app-only, {source.Identity}";
-                return new ClientCertificateCredential(
-                    options.TenantId,
-                    options.ClientId,
-                    options.ClientCertificatePath,
-                    new ClientCertificateCredentialOptions());
-            }
-
-            description = $"app-only, secret ({source.Identity} - falling back)";
-            return new ClientSecretCredential(options.TenantId, options.ClientId, options.ClientSecret);
+            description = $"app-only, {certificate.Identity}";
+            return certificateCredential;
         }
 
-        description = $"app-only, client secret, {options.ClientSecret.Length} characters";
-        return new ClientSecretCredential(options.TenantId, options.ClientId, options.ClientSecret);
+        if (!string.IsNullOrWhiteSpace(options.ClientSecret))
+        {
+            var secret = AppOnlyTokenSource.WithSecret(options);
+            description = options.HasCertificate
+                ? $"app-only, {secret.Identity} - the certificate leg was not usable: {certificate.Identity}"
+                : $"app-only, {secret.Identity}";
+            return secret.Credential;
+        }
+
+        description = $"none - {certificate.Identity}, and no client secret is set";
+        return null;
     }
 
     private static ProbeTable BuildTable(IReadOnlyList<LegResult> results) =>
