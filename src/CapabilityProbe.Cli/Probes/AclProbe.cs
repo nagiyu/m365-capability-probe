@@ -47,6 +47,10 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
     private const string DeltaExpand = "Graph delta?$expand=permissions";
     private const string SharePointExpand = "SP items?$expand=RoleAssignments";
 
+    private const string RootChildren = "the root folder's children";
+    private const string WholeDrive = "every item in the drive, at any depth";
+    private const string WholeList = "every item in the library list, at any depth";
+
     /// <summary>One route as one identity found it.</summary>
     private sealed record RouteResult
     {
@@ -73,6 +77,19 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
 
         /// <summary>What the last call answered, when the route did not get what it asked for.</summary>
         public string? Refusal { get; init; }
+
+        /// <summary>
+        /// What this route walks. The routes do not all enumerate the same set - one folder's children
+        /// is not the whole library - so two of them returning different item counts is not a
+        /// disagreement, and a report that showed only the counts would invite reading it as one.
+        /// </summary>
+        public required string Enumerates { get; init; }
+
+        /// <summary>
+        /// One line per item, so a count can be checked rather than taken on trust. Names are the
+        /// file names the service returned; the members of an ACL are still only counted.
+        /// </summary>
+        public IReadOnlyList<string> Breakdown { get; init; } = [];
 
         public bool Ran => Blocked is null;
     }
@@ -153,8 +170,8 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             await ResolveSiteAsync(leg, cancellationToken);
 
             leg.Routes.Add(await BaselineAsync(leg, cancellationToken));
-            leg.Routes.Add(await GraphBulkAsync(leg, ChildrenExpand, "/drive/root/children?$expand=permissions", cancellationToken));
-            leg.Routes.Add(await GraphBulkAsync(leg, DeltaExpand, "/drive/root/delta?$expand=permissions", cancellationToken));
+            leg.Routes.Add(await GraphBulkAsync(leg, ChildrenExpand, "/drive/root/children?$expand=permissions", RootChildren, cancellationToken));
+            leg.Routes.Add(await GraphBulkAsync(leg, DeltaExpand, "/drive/root/delta?$expand=permissions", WholeDrive, cancellationToken));
             leg.Routes.Add(await SharePointBulkAsync(leg, cancellationToken));
         }
 
@@ -212,7 +229,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
     {
         if (leg.Blocked is not null || leg.SiteId is null || leg.GraphToken.AccessToken is null)
         {
-            return Blocked(Baseline, leg);
+            return Blocked(Baseline, RootChildren, leg);
         }
 
         var token = leg.GraphToken.AccessToken;
@@ -226,6 +243,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             {
                 Route = Baseline,
                 Mode = leg.Mode,
+                Enumerates = RootChildren,
                 Calls = 1,
                 ElapsedMs = children.ElapsedMs,
                 Refusal = Describe(children),
@@ -235,6 +253,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         var calls = 1;
         var elapsed = children.ElapsedMs;
         var perItem = new Dictionary<string, string>(StringComparer.Ordinal);
+        var breakdown = new List<string>();
         var entries = 0;
         var withAcl = 0;
 
@@ -250,18 +269,21 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             if (acl is null)
             {
                 perItem[item.Id] = $"unread ({permissions.StatusText})";
+                breakdown.Add($"{item.Name ?? item.Id}: unread ({permissions.StatusText})");
                 continue;
             }
 
             withAcl++;
             entries += acl.Count;
             perItem[item.Id] = acl.Fingerprint;
+            breakdown.Add($"{item.Name ?? item.Id}: {acl.Fingerprint}");
         }
 
         return new RouteResult
         {
             Route = Baseline,
             Mode = leg.Mode,
+            Enumerates = RootChildren,
             Calls = calls,
             ElapsedMs = elapsed,
             Items = page.Items.Count,
@@ -269,15 +291,16 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             Entries = entries,
             MorePages = page.MorePages,
             PerItem = perItem,
+            Breakdown = breakdown,
         };
     }
 
     private async Task<RouteResult> GraphBulkAsync(
-        Leg leg, string route, string path, CancellationToken cancellationToken)
+        Leg leg, string route, string path, string enumerates, CancellationToken cancellationToken)
     {
         if (leg.Blocked is not null || leg.SiteId is null || leg.GraphToken.AccessToken is null)
         {
-            return Blocked(route, leg);
+            return Blocked(route, enumerates, leg);
         }
 
         var observation = await http.GetAsync(
@@ -291,6 +314,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             {
                 Route = route,
                 Mode = leg.Mode,
+                Enumerates = enumerates,
                 Calls = 1,
                 ElapsedMs = observation.ElapsedMs,
                 Refusal = Describe(observation),
@@ -301,6 +325,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         {
             Route = route,
             Mode = leg.Mode,
+            Enumerates = enumerates,
             Calls = 1,
             ElapsedMs = observation.ElapsedMs,
             Items = page.Items.Count,
@@ -310,6 +335,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             PerItem = page.Items
                 .Where(i => i.Permissions is not null)
                 .ToDictionary(i => i.Id, i => i.Permissions!.Fingerprint, StringComparer.Ordinal),
+            Breakdown = Describe(page),
         };
     }
 
@@ -323,7 +349,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
     {
         if (leg.Blocked is not null || leg.SiteId is null || leg.GraphToken.AccessToken is null)
         {
-            return Blocked(SharePointExpand, leg);
+            return Blocked(SharePointExpand, WholeList, leg);
         }
 
         if (!leg.SharePointToken.Succeeded || leg.SharePointToken.AccessToken is null)
@@ -332,6 +358,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             {
                 Route = SharePointExpand,
                 Mode = leg.Mode,
+                Enumerates = WholeList,
                 Blocked = leg.SharePointToken.Requested
                     ? $"no SharePoint token was issued for this mode: {leg.SharePointToken.ErrorCode}"
                     : $"this identity never asked for a SharePoint token: {leg.SharePointToken.ErrorDetail}",
@@ -349,6 +376,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             {
                 Route = SharePointExpand,
                 Mode = leg.Mode,
+                Enumerates = WholeList,
                 Calls = 1,
                 ElapsedMs = drive.ElapsedMs,
                 Refusal = $"the library path was never discovered ({Describe(drive)})",
@@ -368,6 +396,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             {
                 Route = SharePointExpand,
                 Mode = leg.Mode,
+                Enumerates = WholeList,
                 Calls = 2,
                 ElapsedMs = drive.ElapsedMs + items.ElapsedMs,
                 Refusal = Describe(items),
@@ -378,17 +407,35 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         {
             Route = SharePointExpand,
             Mode = leg.Mode,
+            Enumerates = WholeList,
             Calls = 2,
             ElapsedMs = drive.ElapsedMs + items.ElapsedMs,
             Items = page.Items.Count,
             WithAcl = page.Expanded,
             Entries = page.TotalEntries,
             MorePages = page.MorePages,
+            Breakdown = Describe(page),
         };
     }
 
-    private static RouteResult Blocked(string route, Leg leg) =>
-        new() { Route = route, Mode = leg.Mode, Blocked = leg.Blocked ?? "this identity could not be established" };
+    /// <summary>
+    /// One line per item: what it is called, and how big its ACL was. It is the difference between a
+    /// route that returned five items and a route that returned four being inspectable rather than
+    /// argued about.
+    /// </summary>
+    private static IReadOnlyList<string> Describe(AclResponses.Page page) =>
+        page.Items
+            .Select(i => $"{i.Name ?? i.Id}: {i.Permissions?.Fingerprint ?? "(no acl)"}")
+            .ToList();
+
+    private static RouteResult Blocked(string route, string enumerates, Leg leg) =>
+        new()
+        {
+            Route = route,
+            Mode = leg.Mode,
+            Enumerates = enumerates,
+            Blocked = leg.Blocked ?? "this identity could not be established",
+        };
 
     /// <summary>
     /// Why a route produced no page. A refusal and a success whose body could not be read are
@@ -444,6 +491,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                 rows.Add(new[]
                 {
                     route.Route,
+                    route.Enumerates,
                     leg.Mode.Display(),
                     route.Ran ? route.Calls.ToString() : "-",
                     route.Ran ? route.ElapsedMs.ToString() : "-",
@@ -458,7 +506,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
 
         return new ProbeTable(
             "What each route cost (site resolution is excluded - every route needs it)",
-            ["route", "mode", "calls", "ms", "items", "with acl", "acl entries", "more pages", "why not"],
+            ["route", "walks", "mode", "calls", "ms", "items", "with acl", "acl entries", "more pages", "why not"],
             rows);
     }
 
@@ -584,6 +632,8 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                 ["itemsWithAcl"] = route.WithAcl?.ToString(),
                 ["aclEntries"] = route.Entries?.ToString(),
                 ["morePages"] = route.MorePages?.ToString(),
+                ["enumerates"] = route.Enumerates,
+                ["breakdown"] = route.Breakdown.Count == 0 ? null : string.Join(" | ", route.Breakdown),
                 ["refusal"] = route.Refusal,
                 ["perItem"] = route.PerItem.Count == 0
                     ? null
