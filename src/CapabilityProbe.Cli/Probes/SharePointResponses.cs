@@ -97,8 +97,17 @@ public static class SharePointResponses
             : $"{members.Count} members (PrincipalType {string.Join(", ", kinds)})";
     }
 
-    /// <summary>The first site group ID in a listing, for building the membership call.</summary>
-    public static string? FirstGroupId(HttpObservation? observation)
+    /// <summary>
+    /// The first site group in a listing - its ID for building the membership call, and its title.
+    /// <para>
+    /// The title travels with the ID because a membership result is meaningless without knowing whose
+    /// membership it is. A site's groups are not interchangeable: some are the ones an administrator
+    /// created and populated, and some are bookkeeping SharePoint generated for itself. "0 members" is
+    /// an ordinary fact about the second kind and a surprising one about the first, and a report that
+    /// gave only a number would let a reader take one for the other.
+    /// </para>
+    /// </summary>
+    public static (string Id, string? Title)? FirstGroup(HttpObservation? observation)
     {
         if (observation is null || !observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
         {
@@ -117,7 +126,11 @@ public static class SharePointResponses
             {
                 if (entry.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.Number)
                 {
-                    return id.GetRawText();
+                    return (
+                        id.GetRawText(),
+                        entry.TryGetProperty("Title", out var title) && title.ValueKind == JsonValueKind.String
+                            ? title.GetString()
+                            : null);
                 }
             }
 
