@@ -501,6 +501,52 @@ SharePoint の audience と、Graph の付与を写した `scp` を持って返�
 **値は生のまま出します** ― `PrincipalType` と同じで、**数値の一般的な意味をこのツールは測って
 いません**。測ったのは「自分の 3 本については、値が名乗り方に対応して動いた」ことだけです。
 
+### `acl`
+
+`access` は権限一覧を **確実な方法** で読みます ― アイテムを解決して、そのアイテムに権限一覧を訊く。
+これは **ファイル 1 つにつき 1 回の呼び出し**なので、ライブラリ全体を読むならファイルの数だけ呼ぶ
+ことになります。**もっと安い経路があるかどうかは、別の問いで、ずっと訊いていませんでした。**
+ここが通れば「毎回、全ファイルの ACL を読む」が、数個のファイルにしかやらないことではなくなります。
+
+候補は 3 つ。**どれもこのテナントで動くと分かっているわけではありません。**
+
+```
+基準   GET /drive/root/children                      + アイテム数だけ /permissions
+候補 A GET /drive/root/children?$expand=permissions   1 回
+候補 B GET /drive/root/delta?$expand=permissions      1 回
+候補 C GET {SiteUrl}/_api/web/GetList('<パス>')/items?$expand=RoleAssignments   1 回 (+ 探索 1 回)
+```
+
+3 本の identity すべてで、**同じ実行の中で、同じライブラリに対して**測ります。候補 C のライブラリの
+パスは Graph 側の答えから取ります ― **2 つの API が同じライブラリを見ていることを保証する**ためで、
+それぞれが勝手に選んだものを比べても比較になりません。その探索呼び出しも**回数に数えます**
+(別の API 無しには組み立てられない経路は、その分だけ高い)。
+
+**安さだけを見るのは、この測定で一番危ない読み方です。** 4 分の 1 の時間で返ってきたのが 4 分の 1 の
+答えだったなら、それは良い経路ではありません。そこで各経路は次も報告します。
+
+| 列 | なぜ要るか |
+| --- | --- |
+| `items` | 何件返ってきたか |
+| `with acl` | **そのうち何件が ACL を伴っていたか。** これが `items` を下回れば、展開は無視されています |
+| `acl entries` | 権限エントリの総数 |
+| `more pages` | **1 回で終わったのか、続きがあったのか** |
+
+そして Graph の 2 候補については、**アイテム ID ごとに基準と突き合わせます** ― エントリ数と
+プリンシパルの種類の組み合わせで。**件数が減っている経路も、同じ件数で中身が薄い経路も、これで
+出ます**(誰の名前も出さずに)。
+
+**候補 C はこの突き合わせに出しません。** SharePoint の RoleAssignment と Graph の権限エントリは
+**重なる事実を別のモデルで書いた別のオブジェクト**で、リスト アイテム ID もドライブ アイテム ID とは
+別物です。並べて数を比べれば「2 つのモデルは対応する」とこのツールが主張することになり、**それは
+測っていません**。C は単独で、返ってきたものをそのまま記録します。
+
+**エントリの数え方は `access` と同じコードです。** 別々に書けば、2 つの写しの差が API の差に化けます。
+
+最後に、identity ごとに 1 行だけ結論が出ます ― **1 件ずつなら何回・何ミリ秒、束でなら何回・何ミリ秒**。
+JSON にはアイテム 1 件あたりの呼び出し回数も入ります。**ライブラリ全体に広げてよいかを決めるのは
+その率**で、4 ファイルで半分になる経路は 4000 ファイルでも半分です。
+
 ## 出力の読み方
 
 レポートの各行は 3 つのものを持ちます。
@@ -542,9 +588,11 @@ src/CapabilityProbe.Cli/
                       AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
   Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
                       ApiError ― Graph と SharePoint で形の違うエラーから code と message を取る
-  Probes/             AuthProbe, AccessProbe, SharePointProbe
-                      SharePointResponses ― 応答の解釈。テナントが無いと実行されない部分なので
-                      呼び出し側と分けてある
+  Probes/             AuthProbe, AccessProbe, SharePointProbe, AclProbe
+                      SharePointResponses / AclResponses ― 応答の解釈。テナントが無いと実行され
+                      ない部分なので呼び出し側と分けてある
+                      PermissionSummary ― 権限エントリの数え方。access と acl で共有している
+                      (別々に書くと、写しの差が API の差に化ける)
   Reporting/          MeasurementStatus, Observation, ProbeReport, ConsoleReportWriter,
                       JsonReportWriter
 ```

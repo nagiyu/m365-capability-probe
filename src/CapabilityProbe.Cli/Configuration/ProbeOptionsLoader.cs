@@ -17,8 +17,9 @@ public static class ProbeOptionsLoader
     public const string AuthCommand = "auth";
     public const string AccessCommand = "access";
     public const string SharePointCommand = "sharepoint";
+    public const string AclCommand = "acl";
 
-    public static readonly string[] AllCommands = [AuthCommand, AccessCommand, SharePointCommand];
+    public static readonly string[] AllCommands = [AuthCommand, AccessCommand, SharePointCommand, AclCommand];
 
     /// <summary>Every subcommand needs these; none of them can run without an identity and a site.</summary>
     private static readonly string[] Everywhere = AllCommands;
