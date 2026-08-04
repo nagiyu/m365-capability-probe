@@ -23,8 +23,8 @@ on:
         description: "DelegatedUserHint - the sign-in name the delegated leg should be completed with"
         type: string
         required: true
-      file_path:
-        description: "FilePath - access only. No library name. e.g. /test.docx"
+      file_paths:
+        description: "FilePaths - access only. Several allowed, separated by '|'. No library name. e.g. /a.docx|/sub/b.docx"
         type: string
         required: false
         default: ""
@@ -74,13 +74,13 @@ jobs:
         # wait for a person and not to the job as a whole.
         timeout-minutes: 20
         env:
-          # Only the three values that never change per run are secrets. SiteUrl, FilePath and
+          # Only the three values that never change per run are secrets. SiteUrl, FilePaths and
           # DelegatedUserHint are what a given run is about, so they are dispatch inputs.
           PROBE_TENANTID: ${{ secrets.PROBE_TENANTID }}
           PROBE_CLIENTID: ${{ secrets.PROBE_CLIENTID }}
           PROBE_CLIENTSECRET: ${{ secrets.PROBE_CLIENTSECRET }}
           PROBE_SITEURL: ${{ inputs.site_url }}
-          PROBE_FILEPATH: ${{ inputs.file_path }}
+          PROBE_FILEPATHS: ${{ inputs.file_paths }}
           PROBE_DELEGATEDUSERHINT: ${{ inputs.delegated_user_hint }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}

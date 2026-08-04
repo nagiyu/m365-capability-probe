@@ -19,12 +19,25 @@ public sealed class ProbeOptions
     public string SiteUrl { get; set; } = string.Empty;
 
     /// <summary>
-    /// Path of the file to read, relative to the root of the site's default document library and not
-    /// including the library's own name - a file sitting directly in that library is just
-    /// <c>/test.docx</c>. This is the path the probe appends to <c>/drive/root:</c>, and prefixing it
-    /// with the library name looks for a folder of that name inside the library instead.
+    /// One or more paths to read, separated by <c>|</c>.
+    /// <para>
+    /// Each path is relative to the root of the site's default document library and does not include
+    /// the library's own name - a file sitting directly in that library is just <c>/test.docx</c>.
+    /// This is what the probe appends to <c>/drive/root:</c>, and prefixing it with the library name
+    /// looks for a folder of that name inside the library instead.
+    /// </para>
+    /// <para>
+    /// A delimited string rather than an array because this value has to survive five configuration
+    /// layers and a workflow dispatch input, and an array is awkward in four of the six.
+    /// <c>|</c> is one of the characters SharePoint refuses in a file or folder name, so it can never
+    /// occur inside a path and never needs escaping.
+    /// </para>
     /// </summary>
-    public string FilePath { get; set; } = string.Empty;
+    public string FilePaths { get; set; } = string.Empty;
+
+    /// <summary>The paths, split and trimmed. Empty when none are configured.</summary>
+    public IReadOnlyList<string> Files =>
+        FilePaths.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>Sign-in name the operator should use for the delegated (device code) leg.</summary>
     public string DelegatedUserHint { get; set; } = string.Empty;

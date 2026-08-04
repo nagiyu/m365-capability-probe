@@ -64,14 +64,21 @@ Graph と、あとから足すかもしれない SharePoint REST とを 1 つの
 | `ClientId` | アプリケーション (クライアント) ID |
 | `ClientSecret` | クライアント シークレット |
 | `SiteUrl` | `https://<host>/sites/<name>` |
-| `FilePath` | サイトの既定のドキュメント ライブラリ内のパス。例 `/test.docx` |
+| `FilePaths` | 読むファイルのパス。`\|` 区切りで複数指定できる。例 `/test.docx\|/drafts/q3.docx` |
 | `DelegatedUserHint` | 委任側で使う利用者のサインイン名 |
 
-**`FilePath` にライブラリ名自体は含めません。** この値は `/drive/root:` に付け足されますが、そこは
-すでにサイトの既定のドキュメント ライブラリのルートです。したがってライブラリ直下にあるファイルは
-`/Shared Documents/test.docx` ではなく、単に `/test.docx` です。ライブラリ名を頭に付けると、
+**`FilePaths` の各パスにライブラリ名自体は含めません。** この値は `/drive/root:` に付け足されますが、
+そこはすでにサイトの既定のドキュメント ライブラリのルートです。したがってライブラリ直下にある
+ファイルは `/Shared Documents/test.docx` ではなく、単に `/test.docx` です。ライブラリ名を頭に付けると、
 ライブラリの **中にある** 同名のフォルダを探しに行って `404` が返ります。サブフォルダはパスに
 含めます: `/drafts/q3.docx`。
+
+区切り文字が `|` なのは、**SharePoint がファイル名とフォルダ名に許さない文字だから**です。パスの
+中に現れることがないので、エスケープを考える必要がありません。配列にしなかったのは、この値が
+5 つの設定層と GitHub Actions の dispatch 入力を通る必要があり、そのうち 4 つで配列が扱いにくい
+ためです。
+
+**何個並べても、デバイス コードのサインインは 1 回だけ**です。
 
 他の 5 つのキーはそのまま読まれます。分解されるのは `SiteUrl` だけで、ホスト名 (SharePoint の
 スコープになります) とサーバー相対パス (サイトを解決します) に分けられます。
@@ -93,7 +100,7 @@ dotnet user-secrets set "TenantId"          "<テナントの GUID>"
 dotnet user-secrets set "ClientId"          "<クライアントの GUID>"
 dotnet user-secrets set "ClientSecret"      "<シークレットの値>"
 dotnet user-secrets set "SiteUrl"           "https://contoso.sharepoint.com/sites/probe"
-dotnet user-secrets set "FilePath"          "/test.docx"
+dotnet user-secrets set "FilePaths"         "/test.docx|/drafts/q3.docx"
 dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
 ```
 
@@ -104,12 +111,12 @@ dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
 Missing or invalid keys:
   ClientSecret       missing - client secret; keep it in user-secrets, not in a committed file
                      blocks: auth, access
-  FilePath           missing - path inside the site's default document library, without the library's own name, e.g. /test.docx
+  FilePaths          missing - one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx
                      blocks: access
 
 Subcommand readiness:
   auth     ready
-  access   needs FilePath
+  access   needs FilePaths
 ```
 
 ## 実行
@@ -122,7 +129,7 @@ dotnet run --project src/CapabilityProbe.Cli -- access
 任意のキーは実行ごとに上書きできます。
 
 ```bash
-dotnet run --project src/CapabilityProbe.Cli -- access --FilePath="/drafts/q3.docx"
+dotnet run --project src/CapabilityProbe.Cli -- access --FilePaths="/a.docx|/drafts/b.docx"
 ```
 
 どちらのサブコマンドも、表を出力すると同時に、同じ内容を
@@ -196,8 +203,8 @@ API アクセス許可の画面にそう書いてある箇所はありません�
 
 ### `access`
 
-同一ファイルの権限一覧を 2 回 ― app-only と delegated で ― **1 回の実行のうちに** 読みます。両方が
-同じ瞬間を記述するようにするためです。どちらの経路も同じ 3 つの呼び出しを辿ります。
+`FilePaths` に並べたファイルのすべてを、app-only と delegated の両方で ― **1 回の実行のうちに** ―
+読みます。どちらの経路も同じ呼び出しを辿ります。
 
 ```
 GET /v1.0/sites/{ホスト名}:{サーバー相対パス}            -> サイト ID
@@ -207,6 +214,12 @@ GET /v1.0/sites/{サイトID}/drive/items/{アイテムID}/permissions
 
 パスによる指定は、次の URL を組み立てる前に必ず ID へ解決します。Graph のパス指定はコロン区間を
 1 つしか使えず、2 つつないだ URL は `400` で弾かれます。
+
+**2 つの identity を先に確立してから、ファイルを 1 つずつ両方で読みます。** サイトの解決も identity
+ごとに 1 回だけで、ファイルごとには繰り返しません。この順序には意味があります: 1 つのファイルについて
+2 つの答えが食い違ったとき、その差は identity の違いによるものでなければならず、2 つの呼び出しの間隔が
+短いほど「その間に何かが変わった」という説明の余地が狭くなります。そして**ファイルが何個あっても
+デバイス コードのサインインは 1 回**で済みます。
 
 モードごとに、各呼び出しの HTTP ステータス、権限エントリの件数、そこに現れたプリンシパルの種類
 (`user` / `group` / `siteGroup` / `application` / `link:…`)、所要ミリ秒を記録します。発行した呼び出しの
@@ -249,7 +262,7 @@ GET /v1.0/sites/{サイトID}/drive/items/{アイテムID}/permissions
 | `PROBE_CLIENTSECRET` | `ClientSecret` |
 
 残りの 3 つは、その実行が何を測るのかそのものなので、dispatch の入力です。`SiteUrl` と
-`DelegatedUserHint` は必須、`FilePath` は `access` のときだけ必要です (`auth` では空のまま実行できます)。
+`DelegatedUserHint` は必須、`FilePaths` は `access` のときだけ必要です (`auth` では空のまま実行できます)。
 サブコマンドも入力から選びます。
 
 **委任のレグは無人にはなりません。** デバイス コード フローには人が要ります。ワークフローは
@@ -294,10 +307,16 @@ app-only のトークンを先に取ってから止まり、コードと URL を
 読み取りは 0 件だったのではなく、起きなかったのです。空欄は 0 件と読めてしまいますが、`NotRun` は
 そう読めません。
 
-終了コードは **測定が完走したか** を答えるもので、テナントがどう振る舞ったかではありません。拒否も、
-空の一覧も、何も持たないトークンも、いずれも成功した測定なので `0` です。
+終了コードは **プローブが仕事をできたか** を答えるもので、テナントがどう振る舞ったかではありません。
+拒否も、空の一覧も、`404` も、何も持たないトークンも、そしてそれらによって到達不能になったステップも、
+すべて測定です。いずれも `0` です。
 
-`0` すべて測定できた、`2` 走らなかったものがある、`64` 使い方の誤り、`78` 設定が不完全、`130` 中断。
+不完全なのは 1 つの場合だけ ― **デバイス コードを表示したのに誰もサインインしなかった** ときで、
+これは測定ではなく操作の失敗です。有効な測定を CI が赤で表示すると、読み手は赤を無視するように
+なります。
+
+`0` プローブは動いた、`2` 委任のサインインが完了しなかった、`64` 使い方の誤り、`78` 設定が不完全、
+`130` 中断。
 
 ## 構成
 
