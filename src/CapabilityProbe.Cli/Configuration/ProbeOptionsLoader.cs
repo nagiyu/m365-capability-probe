@@ -28,18 +28,20 @@ public static class ProbeOptionsLoader
     {
         var options = new ProbeOptions();
         var problems = new List<ConfigurationProblem>();
+        IConfigurationRoot? configuration = null;
 
         try
         {
-            new ConfigurationBuilder()
+            configuration = new ConfigurationBuilder()
                 .SetBasePath(AppContext.BaseDirectory)
                 .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
                 .AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: false)
                 .AddUserSecrets(typeof(ProbeOptionsLoader).Assembly, optional: true)
                 .AddEnvironmentVariables("PROBE_")
                 .AddCommandLine(configArgs)
-                .Build()
-                .Bind(options);
+                .Build();
+
+            configuration.Bind(options);
         }
         catch (Exception ex) when (ex is FormatException or InvalidDataException)
         {
@@ -60,8 +62,18 @@ public static class ProbeOptionsLoader
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
         Require(problems, "DelegatedUserHint", options.DelegatedUserHint, BothCommands,
             "sign-in name to use for the device code leg, shown on screen before sign-in");
-        Require(problems, "FilePath", options.FilePath, AccessOnly,
-            "path inside the site's default document library, without the library's own name, e.g. /test.docx");
+        Require(problems, "FilePaths", options.FilePaths, AccessOnly,
+            "one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx");
+
+        // This key used to be singular. Saying so beats leaving a stale value silently ignored while
+        // the run reports that nothing is configured.
+        if (!string.IsNullOrWhiteSpace(configuration?["FilePath"]))
+        {
+            problems.Add(new ConfigurationProblem(
+                "FilePath",
+                "renamed to FilePaths, which takes several paths separated by '|'. The old value is being ignored",
+                AccessOnly));
+        }
 
         if (!string.IsNullOrWhiteSpace(options.SiteUrl))
         {
@@ -76,11 +88,11 @@ public static class ProbeOptionsLoader
             }
         }
 
-        if (!string.IsNullOrWhiteSpace(options.FilePath) && !options.FilePath.StartsWith('/'))
+        foreach (var file in options.Files.Where(f => !f.StartsWith('/')))
         {
             problems.Add(new ConfigurationProblem(
-                "FilePath",
-                $"must start with '/': '{options.FilePath}' (expected e.g. /test.docx)",
+                "FilePaths",
+                $"every path must start with '/': '{file}' (expected e.g. /test.docx)",
                 AccessOnly));
         }
 

@@ -23,8 +23,8 @@ on:
         description: "DelegatedUserHint - the sign-in name the delegated leg should be completed with"
         type: string
         required: true
-      file_path:
-        description: "FilePath - access only. No library name. e.g. /test.docx"
+      file_paths:
+        description: "FilePaths - access only. Several allowed, separated by '|'. No library name. e.g. /a.docx|/sub/b.docx"
         type: string
         required: false
         default: ""
@@ -66,20 +66,21 @@ jobs:
         run: |
           echo "The next step requests app-only tokens first, then stops and prints a device code."
           echo "Open the URL it prints, enter the code, and sign in as: ${{ inputs.delegated_user_hint }}"
-          echo "Signing in as anyone else measures that person's reach instead - the report says so if you do."
+          echo "Signing in as anyone else measures that person's reach instead. The report records"
+          echo "which account actually completed the sign-in, so a run is never silently about someone else."
 
       - name: Probe
         # The delegated sign-in is the long pole. Bounded here so a timeout is attributed to the
         # wait for a person and not to the job as a whole.
         timeout-minutes: 20
         env:
-          # Only the three values that never change per run are secrets. SiteUrl, FilePath and
+          # Only the three values that never change per run are secrets. SiteUrl, FilePaths and
           # DelegatedUserHint are what a given run is about, so they are dispatch inputs.
           PROBE_TENANTID: ${{ secrets.PROBE_TENANTID }}
           PROBE_CLIENTID: ${{ secrets.PROBE_CLIENTID }}
           PROBE_CLIENTSECRET: ${{ secrets.PROBE_CLIENTSECRET }}
           PROBE_SITEURL: ${{ inputs.site_url }}
-          PROBE_FILEPATH: ${{ inputs.file_path }}
+          PROBE_FILEPATHS: ${{ inputs.file_paths }}
           PROBE_DELEGATEDUSERHINT: ${{ inputs.delegated_user_hint }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
@@ -88,11 +89,14 @@ jobs:
           status=0
           dotnet run --project src/CapabilityProbe.Cli -c Release --no-build -- "$SUBCOMMAND" || status=$?
 
+          # The exit code says whether the probe could do its job, not whether the tenant behaved.
+          # A refusal, an empty list, a 404, a token carrying nothing, and a step left unreachable by
+          # one of those are all measurements, and all exit 0. Read the tables for what was found;
+          # read this only for whether the probe got to run.
           echo
           case "$status" in
-            0)   echo "exit 0   - every claim held" ;;
-            1)   echo "exit 1   - a claim was contradicted; read the [!] cells above" ;;
-            2)   echo "exit 2   - something never ran; the delegated sign-in most likely went uncompleted" ;;
+            0)   echo "exit 0   - the probe ran; the findings are in the tables above" ;;
+            2)   echo "exit 2   - the delegated sign-in was never completed, so the delegated half is empty" ;;
             64)  echo "exit 64  - bad usage" ;;
             78)  echo "exit 78  - configuration is incomplete; the missing keys are listed above" ;;
             130) echo "exit 130 - cancelled" ;;

@@ -46,6 +46,13 @@ public sealed class DelegatedTokenSource : ITokenSource
     public bool IsSignedIn { get; private set; }
 
     /// <summary>
+    /// The account that actually completed the sign-in, which is not necessarily
+    /// <see cref="ProbeOptions.DelegatedUserHint"/>. The hint is a setting; this is what happened.
+    /// A report that records the hint is asserting something it did not measure.
+    /// </summary>
+    public string? SignedInAs { get; private set; }
+
+    /// <summary>
     /// Runs the device code flow once, using Graph as the baseline resource.
     /// Returns the same shaped result as any other token request so a refused sign-in is reportable.
     /// </summary>
@@ -62,6 +69,7 @@ public sealed class DelegatedTokenSource : ITokenSource
             stopwatch.Stop();
 
             IsSignedIn = true;
+            SignedInAs = record.Username;
             _alreadyAcquired.Add(scope);
             _console.WriteLine($"Signed in as: {record.Username}");
             if (!string.Equals(record.Username, _options.DelegatedUserHint, StringComparison.OrdinalIgnoreCase))

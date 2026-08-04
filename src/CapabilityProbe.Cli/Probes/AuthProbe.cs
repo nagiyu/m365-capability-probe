@@ -5,9 +5,13 @@ using CapabilityProbe.Reporting;
 namespace CapabilityProbe.Probes;
 
 /// <summary>
-/// Asks for a token in all three audiences, twice over - once as the app, once as a person -
-/// and reports the six answers. Nothing is called with the tokens; this subcommand only measures
-/// which doors the app registration is allowed to knock on.
+/// Asks for a token in all three audiences, twice over - once as the app, once as a person - and
+/// reports the six answers. Nothing is called with the tokens; this subcommand only records which
+/// doors the app registration is allowed to knock on, and what it is holding when it gets in.
+/// <para>
+/// It states no expectation about any of that. What the grants ought to produce is an argument about
+/// a particular tenant, and it belongs in prose where it can carry a date and a reason.
+/// </para>
 /// </summary>
 public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 {
@@ -17,45 +21,13 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
     private static readonly ProbeMode[] Modes =
         [ProbeMode.AppOnly, ProbeMode.Delegated];
 
-    /// <summary>
-    /// Whether the app is expected to hold a usable permission for this pair, given the grants the
-    /// README asks for. A cell that lands somewhere else is the finding - either the grants are not
-    /// what they were believed to be, or the tenant is not.
-    /// <para>
-    /// This is deliberately not "is a token issued". Entra hands out tokens for resources an app was
-    /// granted nothing for, and those tokens carry no roles and no scopes. Judging by issuance alone
-    /// would report such an app as reaching a resource it cannot touch.
-    /// </para>
-    /// </summary>
-    private static bool ExpectsPermission(ProbeAudience audience, ProbeMode mode) => (audience, mode) switch
-    {
-        (ProbeAudience.Graph, _) => true,
-
-        // SharePoint's own Sites.Read.All is granted to the application.
-        (ProbeAudience.SharePoint, ProbeMode.AppOnly) => true,
-
-        // And delegated holds one too, despite no SharePoint delegated permission being granted:
-        // the token comes back with the audience of SharePoint Online and an scp that mirrors the
-        // *Graph* delegated grants exactly. Consenting to Graph's Sites.Read.All reaches SharePoint.
-        // This one was measured, not predicted - the permissions blade shows nothing that explains it,
-        // and the first version of this table expected a refusal here. Removing the Graph delegated
-        // grant should flip this cell, which is the regression this line is worth keeping for.
-        (ProbeAudience.SharePoint, ProbeMode.Delegated) => true,
-
-        // No Azure RMS permission was granted at all, in either direction. App-only still gets a
-        // token - one with no roles in it, which is the distinction this whole subcommand turns on.
-        (ProbeAudience.AzureRms, _) => false,
-
-        _ => false,
-    };
-
     public async Task<ProbeReport> RunAsync(CancellationToken cancellationToken)
     {
         var report = new ProbeReport("auth");
         report.Subject["tenant"] = options.TenantId;
         report.Subject["client"] = options.ClientId;
         report.Subject["site"] = options.SiteUrl;
-        report.Subject["sign-in"] = options.DelegatedUserHint;
+        report.Subject["hint"] = options.DelegatedUserHint;
 
         var results = new Dictionary<(ProbeAudience, ProbeMode), TokenResult?>();
 
@@ -69,6 +41,17 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         var delegated = new DelegatedTokenSource(options, console);
         console.WriteLine("Requesting delegated tokens (device code, on behalf of a person)...");
         var signIn = await delegated.SignInAsync(cancellationToken);
+
+        // Who actually signed in, not who was configured to. A run completed by the wrong account
+        // measures that account's reach, and the report has to say so on its own months from now.
+        report.Subject["signed in"] = delegated.SignedInAs ?? "(nobody - sign-in did not complete)";
+
+        if (!delegated.IsSignedIn)
+        {
+            report.MarkIncomplete(
+                "the device code was printed but the sign-in was never completed, so the delegated column " +
+                "is empty for want of an identity rather than for want of an answer");
+        }
 
         if (signIn.Succeeded)
         {
@@ -108,18 +91,18 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             {
                 audience.Display(),
                 ScopeResolver.Resolve(audience, options),
-                MatrixCell(audience, ProbeMode.AppOnly, results[(audience, ProbeMode.AppOnly)]),
-                MatrixCell(audience, ProbeMode.Delegated, results[(audience, ProbeMode.Delegated)]),
+                MatrixCell(results[(audience, ProbeMode.AppOnly)]),
+                MatrixCell(results[(audience, ProbeMode.Delegated)]),
             })
             .ToList();
 
         return new ProbeTable(
-            "What the app holds ([!] marks a cell that missed its expectation)",
+            "What the app holds",
             ["audience", "scope", "app-only", "delegated"],
             rows);
     }
 
-    private static string MatrixCell(ProbeAudience audience, ProbeMode mode, TokenResult? result)
+    private static string MatrixCell(TokenResult? result)
     {
         if (result is null)
         {
@@ -134,12 +117,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             _ => $"token, {result.Claims.GrantSummary()}",
         };
 
-        if (result.ServedFromCache)
-        {
-            text += " (cached)";
-        }
-
-        return result.CarriesPermission == ExpectsPermission(audience, mode) ? text : $"[!] {text}";
+        return result.ServedFromCache ? $"{text} (cached)" : text;
     }
 
     private static ProbeTable BuildDetail(IReadOnlyDictionary<(ProbeAudience, ProbeMode), TokenResult?> results)
@@ -155,10 +133,10 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                 {
                     audience.Display(),
                     mode.Display(),
-                    ExpectsPermission(audience, mode) ? "permission" : "none",
                     result is null ? "NotRun" : result.Succeeded ? "issued" : "refused",
                     result?.Claims?.GrantSummary() ?? (result?.Succeeded == true ? "(claims unreadable)" : ""),
                     result?.Claims?.Audience ?? "",
+                    result?.Claims?.SignedInAs ?? "",
                     result?.ErrorCode ?? "",
                     result is null ? "" : result.ServedFromCache ? "cached" : result.ElapsedMs.ToString(),
                     result?.ErrorDetail ?? "",
@@ -168,20 +146,17 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 
         return new ProbeTable(
             "Token requests in detail (token claims are read, not verified - this tool is not their audience)",
-            ["audience", "mode", "expected", "token", "granted", "aud claim", "error code", "ms", "error detail"],
+            ["audience", "mode", "token", "granted", "aud claim", "upn claim", "error code", "ms", "error detail"],
             rows);
     }
 
     private static Observation BuildObservation(ProbeAudience audience, ProbeMode mode, TokenResult? result)
     {
-        var expectsPermission = ExpectsPermission(audience, mode);
-        var claim = expectsPermission
-            ? $"{audience.Display()} / {mode.Display()}: the app holds a usable permission"
-            : $"{audience.Display()} / {mode.Display()}: the app holds no usable permission";
+        var subject = $"{audience.Display()} / {mode.Display()}: what the app holds";
 
         if (result is null)
         {
-            return Observation.NotRun(claim, "the delegated sign-in did not complete, so this audience was never requested");
+            return Observation.NotRun(subject, "the delegated sign-in did not complete, so this audience was never requested");
         }
 
         var timing = result.ServedFromCache ? "from the credential's cache" : $"{result.ElapsedMs} ms";
@@ -195,14 +170,13 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             _ => $"token issued carrying {result.Claims.GrantSummary()} ({timing})",
         };
 
-        return new Observation(claim, observed, result.CarriesPermission == expectsPermission ? Verdict.Ok : Verdict.Failed)
+        return Observation.Measured(subject, observed) with
         {
             Details = new Dictionary<string, string?>
             {
                 ["audience"] = audience.Display(),
                 ["mode"] = mode.Display(),
                 ["scope"] = result.Scope,
-                ["expectedPermission"] = expectsPermission ? "true" : "false",
                 ["tokenIssued"] = result.Succeeded ? "true" : "false",
                 ["carriesPermission"] = result.CarriesPermission ? "true" : "false",
                 ["audClaim"] = result.Claims?.Audience,

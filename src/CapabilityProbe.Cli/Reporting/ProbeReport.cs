@@ -34,11 +34,26 @@ public sealed class ProbeReport
 
     public void Finish() => FinishedAtUtc = DateTimeOffset.UtcNow;
 
-    public int Count(Verdict verdict) => Observations.Count(o => o.Verdict == verdict);
+    public int Count(MeasurementStatus status) => Observations.Count(o => o.Status == status);
 
     /// <summary>
-    /// Exit code for the process. Non-zero only when an observation contradicted its claim or a step
-    /// never ran - never merely because a call was refused, since refusals are the expected result here.
+    /// Why this run could not measure what it set out to, if it could not. In practice there is one
+    /// such case: the device code was printed and nobody completed the sign-in, so the delegated half
+    /// of the report is empty for want of an identity rather than for want of an answer.
     /// </summary>
-    public int ExitCode => Count(Verdict.Failed) > 0 ? 1 : Count(Verdict.NotRun) > 0 ? 2 : 0;
+    public string? IncompleteReason { get; private set; }
+
+    public void MarkIncomplete(string reason) => IncompleteReason ??= reason;
+
+    /// <summary>
+    /// Exit code for the process. It answers "could the probe do its job", not "did the tenant behave"
+    /// and not "did every step run".
+    /// <para>
+    /// <see cref="MeasurementStatus.NotRun"/> rows deliberately do not affect it. A step that was never
+    /// reached was made unreachable by the measurement above it - a file that answers 404 has no item
+    /// ID to ask permissions for, and that 404 is the finding, not a shortfall. Colouring such a run
+    /// red trains a reader to ignore red.
+    /// </para>
+    /// </summary>
+    public int ExitCode => IncompleteReason is null ? 0 : 2;
 }
