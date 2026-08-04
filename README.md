@@ -13,8 +13,8 @@ Entra のアプリ登録 (テナント ID / クライアント ID / クライア
    Graph が実際に返したエラーコードつきで。ここでの `403` は結果であって、不具合の報告ではありません。
 
 すべて `HttpClient` を直接使っています。Graph SDK は使いません ― **どの URL にどのヘッダを付けて
-叩いたかが読めて、手で再現できること** がこのツールの価値であり、SDK はそれを隠すからです。あわせて、
-Graph と、あとから足すかもしれない SharePoint REST とを 1 つの経路で扱えます。
+叩いたかが読めて、手で再現できること** がこのツールの価値であり、SDK はそれを隠すからです。Graph と
+SharePoint REST を同じ経路で扱えるのも、この選択の結果です (SharePoint REST は Graph SDK の対象外です)。
 
 実テナントに対して動かしたところ、**アプリの API アクセス許可画面から立てた妥当な予測が、3 つとも
 外れました。** その顛末は **[docs/findings.md](docs/findings.md)** にまとめてあります。この種の
@@ -124,6 +124,7 @@ Subcommand readiness:
 ```bash
 dotnet run --project src/CapabilityProbe.Cli -- auth
 dotnet run --project src/CapabilityProbe.Cli -- access
+dotnet run --project src/CapabilityProbe.Cli -- sharepoint
 ```
 
 任意のキーは実行ごとに上書きできます。
@@ -288,6 +289,40 @@ app-only のトークンを先に取ってから止まり、コードと URL を
 シークレットに承認を挟みたい場合は、ジョブに `environment:` を足して、その環境に必須のレビュアーを
 設定してください。
 
+### `sharepoint`
+
+`auth` は意図的に 1 歩手前で止まります ― トークンが `Sites.Read.All` を持って返ってきた、と言えますが、
+それは **Entra が何を発行したか** についての事実であって、**SharePoint が何を受け入れるか** についての
+事実ではありません。この 2 つは別の問いで、後者はずっと測られていませんでした。**アプリは、リソースが
+受け付けないクレームを持つことがあり、トークンを見てもそれは分かりません。**
+
+このサブコマンドは SharePoint 宛のトークンを実際に使います。app-only と委任の両方で、2 本。
+
+```
+GET {SiteUrl}/_api/web              -> このサイトを読めるか
+GET {SiteUrl}/_api/web/currentuser  -> SharePoint は誰が呼んでいると思っているか
+```
+
+`Accept` は `application/json;odata=nometadata` です。SharePoint REST は指定しないと冗長な OData の
+封筒で返してくるためで、Graph 側の呼び出しとは違う値を送っています。**送ったヘッダは呼び出しごとに
+記録される**ので、レポートを見れば実際に何を送ったか分かります。
+
+2 本目があるのは、**「トークンが効いたか」と「誰として効いたか」が別の答え** だからです。
+`currentuser` は SharePoint が認識している呼び出し元を返すので、2 つのレグがトークン エンドポイントの
+上だけでなく **リソースの上でも本当に別の identity なのか** がここで分かります。
+
+レポートは **Entra が発行したもの** と **SharePoint が honour したもの** を並べます。
+
+| 見るところ | 何が分かるか |
+| --- | --- |
+| What Entra issued | `roles` / `scp` / `aud` ― トークンが何を持っているか |
+| What SharePoint honoured | 各呼び出しのステータスと、返ってきた中身の一部 |
+| 対比の行 | `roles: Sites.Read.All -> 200 OK` のように、持っているものと起きたことを 1 行に |
+
+**委任側が本題です。** このアプリ登録に SharePoint の委任アクセス許可は 1 つもないのに、委任トークンは
+SharePoint の audience と、Graph の付与を写した `scp` を持って返ってきます (上記参照)。**そういう経路で
+届いたクレームを SharePoint が honour するのかどうかは、アクセス許可の画面からは推論できません。**
+
 ## 出力の読み方
 
 レポートの各行は 3 つのものを持ちます。
@@ -328,7 +363,8 @@ src/CapabilityProbe.Cli/
   Auth/               ProbeMode, ProbeAudience, ScopeResolver, ITokenSource,
                       AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
   Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
-  Probes/             AuthProbe, AccessProbe
+                      ApiError ― Graph と SharePoint で形の違うエラーから code と message を取る
+  Probes/             AuthProbe, AccessProbe, SharePointProbe
   Reporting/          MeasurementStatus, Observation, ProbeReport, ConsoleReportWriter,
                       JsonReportWriter
 ```

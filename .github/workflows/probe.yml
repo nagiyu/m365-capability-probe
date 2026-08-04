@@ -12,7 +12,7 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access]
+        options: [auth, access, sharepoint]
         default: auth
         required: true
       site_url:

@@ -390,26 +390,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
     private static string HeadersOf(HttpObservation observation) => string.Join(" | ", observation.RequestHeaders);
 
     /// <summary>Graph puts its own code in the body; that code says more than the HTTP status alone.</summary>
-    private static string ErrorCodeOf(HttpObservation observation)
-    {
-        if (observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
-        {
-            return "";
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(observation.Body);
-            return document.RootElement.TryGetProperty("error", out var error) &&
-                   error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String
-                ? code.GetString() ?? ""
-                : "";
-        }
-        catch (JsonException)
-        {
-            return "";
-        }
-    }
+    private static string ErrorCodeOf(HttpObservation observation) => ApiError.Code(observation);
 
     private static Observation TokenObservation(Identity identity)
     {

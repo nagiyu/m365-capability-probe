@@ -16,8 +16,13 @@ public static class ProbeOptionsLoader
 {
     public const string AuthCommand = "auth";
     public const string AccessCommand = "access";
+    public const string SharePointCommand = "sharepoint";
 
-    private static readonly string[] BothCommands = [AuthCommand, AccessCommand];
+    public static readonly string[] AllCommands = [AuthCommand, AccessCommand, SharePointCommand];
+
+    /// <summary>Every subcommand needs these; none of them can run without an identity and a site.</summary>
+    private static readonly string[] Everywhere = AllCommands;
+
     private static readonly string[] AccessOnly = [AccessCommand];
 
     /// <summary>
@@ -49,18 +54,18 @@ public static class ProbeOptionsLoader
             problems.Add(new ConfigurationProblem(
                 "(configuration)",
                 $"could not be read: {ex.Message}",
-                BothCommands));
+                Everywhere));
         }
 
-        Require(problems, "TenantId", options.TenantId, BothCommands,
+        Require(problems, "TenantId", options.TenantId, Everywhere,
             "directory (tenant) ID of the app registration");
-        Require(problems, "ClientId", options.ClientId, BothCommands,
+        Require(problems, "ClientId", options.ClientId, Everywhere,
             "application (client) ID of the app registration");
-        Require(problems, "ClientSecret", options.ClientSecret, BothCommands,
+        Require(problems, "ClientSecret", options.ClientSecret, Everywhere,
             "client secret; keep it in user-secrets, not in a committed file");
-        Require(problems, "SiteUrl", options.SiteUrl, BothCommands,
+        Require(problems, "SiteUrl", options.SiteUrl, Everywhere,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
-        Require(problems, "DelegatedUserHint", options.DelegatedUserHint, BothCommands,
+        Require(problems, "DelegatedUserHint", options.DelegatedUserHint, Everywhere,
             "sign-in name to use for the device code leg, shown on screen before sign-in");
         Require(problems, "FilePaths", options.FilePaths, AccessOnly,
             "one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx");
@@ -84,7 +89,7 @@ public static class ProbeOptionsLoader
                 problems.Add(new ConfigurationProblem(
                     "SiteUrl",
                     $"not an absolute https URL: '{options.SiteUrl}' (expected https://<host>/sites/<name>)",
-                    BothCommands));
+                    Everywhere));
             }
         }
 
@@ -129,7 +134,7 @@ public static class ProbeOptionsLoader
 
         writer.WriteLine();
         writer.WriteLine("Subcommand readiness:");
-        foreach (var command in BothCommands)
+        foreach (var command in AllCommands)
         {
             var blockers = problems
                 .Where(p => p.BlockedCommands.Contains(command, StringComparer.OrdinalIgnoreCase))
@@ -138,8 +143,8 @@ public static class ProbeOptionsLoader
                 .ToList();
 
             writer.WriteLine(blockers.Count == 0
-                ? $"  {command,-8} ready"
-                : $"  {command,-8} needs {string.Join(", ", blockers)}");
+                ? $"  {command,-11} ready"
+                : $"  {command,-11} needs {string.Join(", ", blockers)}");
         }
 
         writer.WriteLine();

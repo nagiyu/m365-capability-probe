@@ -44,17 +44,26 @@ public sealed class ProbeHttpClient : IDisposable
         };
     }
 
-    public async Task<HttpObservation> GetAsync(string url, string accessToken, CancellationToken cancellationToken)
+    /// <param name="accept">
+    /// SharePoint REST and Graph want different things here - Graph is happy with plain JSON, while
+    /// SharePoint answers with a verbose envelope unless asked otherwise. It is a parameter rather
+    /// than a constant so the recorded headers stay a record of what was actually sent.
+    /// </param>
+    public async Task<HttpObservation> GetAsync(
+        string url,
+        string accessToken,
+        CancellationToken cancellationToken,
+        string accept = "application/json")
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue.Parse(accept));
 
         // The bearer value is deliberately not recorded; its presence and shape are what matter.
         var recordedHeaders = new[]
         {
             $"Authorization: Bearer <{accessToken.Length} chars, redacted>",
-            "Accept: application/json",
+            $"Accept: {accept}",
         };
 
         var stopwatch = Stopwatch.StartNew();
