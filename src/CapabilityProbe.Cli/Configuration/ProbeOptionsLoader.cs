@@ -18,11 +18,21 @@ public static class ProbeOptionsLoader
     public const string AccessCommand = "access";
     public const string SharePointCommand = "sharepoint";
     public const string AclCommand = "acl";
+    public const string MipCommand = "mip";
 
-    public static readonly string[] AllCommands = [AuthCommand, AccessCommand, SharePointCommand, AclCommand];
+    public static readonly string[] AllCommands =
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand];
 
-    /// <summary>Every subcommand needs these; none of them can run without an identity and a site.</summary>
-    private static readonly string[] Everywhere = AllCommands;
+    /// <summary>
+    /// The subcommands that talk to the tenant. They cannot run without an identity and a site.
+    /// <para>
+    /// <c>mip</c> is deliberately absent: it asks whether this build can reach the SDK at all, which is
+    /// a question about the machine and not about any tenant. Requiring a tenant ID to answer it would
+    /// mean the one subcommand that works before anything is configured refuses to run.
+    /// </para>
+    /// </summary>
+    private static readonly string[] NeedsTenant =
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand];
 
     private static readonly string[] AccessOnly = [AccessCommand];
 
@@ -55,22 +65,22 @@ public static class ProbeOptionsLoader
             problems.Add(new ConfigurationProblem(
                 "(configuration)",
                 $"could not be read: {ex.Message}",
-                Everywhere));
+                NeedsTenant));
         }
 
-        Require(problems, "TenantId", options.TenantId, Everywhere,
+        Require(problems, "TenantId", options.TenantId, NeedsTenant,
             "directory (tenant) ID of the app registration");
-        Require(problems, "ClientId", options.ClientId, Everywhere,
+        Require(problems, "ClientId", options.ClientId, NeedsTenant,
             "application (client) ID of the app registration");
-        Require(problems, "ClientSecret", options.ClientSecret, Everywhere,
+        Require(problems, "ClientSecret", options.ClientSecret, NeedsTenant,
             "client secret; keep it in user-secrets, not in a committed file");
-        Require(problems, "SiteUrl", options.SiteUrl, Everywhere,
+        Require(problems, "SiteUrl", options.SiteUrl, NeedsTenant,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
         // Only when there is a delegated leg to name an account for. A run narrowed to the app's own
         // identities has no use for it, and a setting that blocks a run it takes no part in is noise.
         if (options.RunDelegated)
         {
-            Require(problems, "DelegatedUserHint", options.DelegatedUserHint, Everywhere,
+            Require(problems, "DelegatedUserHint", options.DelegatedUserHint, NeedsTenant,
                 "sign-in name to use for the device code leg, shown on screen before sign-in");
         }
         Require(problems, "FilePaths", options.FilePaths, AccessOnly,
@@ -95,7 +105,7 @@ public static class ProbeOptionsLoader
                 problems.Add(new ConfigurationProblem(
                     "SiteUrl",
                     $"not an absolute https URL: '{options.SiteUrl}' (expected https://<host>/sites/<name>)",
-                    Everywhere));
+                    NeedsTenant));
             }
         }
 
@@ -111,7 +121,7 @@ public static class ProbeOptionsLoader
                 "Identities",
                 $"'{options.Identities}' is not a value this understands - use " +
                 $"'{ProbeOptions.AllIdentities}' or '{ProbeOptions.AppOnlyIdentities}' (empty means all)",
-                Everywhere));
+                NeedsTenant));
         }
 
         // A password with nothing to unlock is the shape a half-finished setup takes: the certificate

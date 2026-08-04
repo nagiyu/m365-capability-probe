@@ -10,10 +10,22 @@
     <UserSecretsId>capability-probe-cli</UserSecretsId>
     <InvariantGlobalization>true</InvariantGlobalization>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- The MIP SDK ships one package per platform, and only the platform packages carry native
+         binaries. This is the Linux one: the base Microsoft.InformationProtection.File package
+         contains win7-x64/x86/arm64 and no .so at all, which was measured rather than assumed. -->
+    <MipPackage>Microsoft.InformationProtection.File.Ubuntu2404</MipPackage>
+    <MipVersion>1.18.124</MipVersion>
+
+    <!-- NU1701: the MIP package declares .NET Framework target frameworks only, so NuGet warns that
+         it is being used from net10.0. Suppressed because the managed assembly was loaded from
+         net10.0 and its types resolved - the warning is about metadata, not about what happened. -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.17.0" />
+    <PackageReference Include="$(MipPackage)" Version="$(MipVersion)" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="10.0.0" />
@@ -28,5 +40,25 @@
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="appsettings.local.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('appsettings.local.json')" />
   </ItemGroup>
+
+  <!--
+    The MIP package's own targets copy its native binaries on Windows only, so on Linux they are
+    placed here instead. Without this the build succeeds, the managed types resolve, and the first
+    call into the SDK fails at run time looking for libmip_dotnet.so - a failure that reads like the
+    SDK not working rather than like a file not being where it was needed.
+
+    Conditioned on the files existing rather than on the platform, so a Windows build stays quiet
+    instead of failing over a copy it was never going to need.
+  -->
+  <Target Name="CopyMipNativeLibraries" AfterTargets="Build">
+    <ItemGroup>
+      <MipNativeLibrary Include="$(NuGetPackageRoot)$(MipPackage.ToLowerInvariant())/$(MipVersion)/dotnet/linux2/native/release/*.so" />
+      <MipNativeLibrary Include="$(NuGetPackageRoot)$(MipPackage.ToLowerInvariant())/$(MipVersion)/build/native/bins/release/x86_64/*.so" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MipNativeLibrary)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(MipNativeLibrary)' != ''" />
+  </Target>
 
 </Project>
