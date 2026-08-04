@@ -27,6 +27,13 @@ namespace CapabilityProbe.Probes;
 /// comes back empty and a file that comes back 404 both look like facts about the file; only the other
 /// identity's answer at the same moment shows them to be facts about the caller.
 /// </para>
+/// <para>
+/// The app is read once here, with its shared secret, and not a second time with its certificate. That
+/// is a choice, not an omission: this subcommand asks what an identity can see, and how the app proved
+/// itself to Entra is a question about the token, not about the file. <c>auth</c> and <c>sharepoint</c>
+/// carry both proofs; running a third leg over every file would double the calls to ask a question
+/// those two already answer.
+/// </para>
 /// </summary>
 public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, TextWriter console)
 {
@@ -75,7 +82,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
 
         // Both identities first, then the files. One sign-in for the whole set.
         console.WriteLine("Establishing the application identity (client credentials)...");
-        var appOnlyToken = await new AppOnlyTokenSource(options).GetTokenAsync(ProbeAudience.Graph, cancellationToken);
+        var appOnlyToken = await AppOnlyTokenSource.WithSecret(options).GetTokenAsync(ProbeAudience.Graph, cancellationToken);
 
         console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
@@ -323,7 +330,7 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
             .Select(i => (IReadOnlyList<string?>)new[]
             {
                 i.Mode.Display(),
-                i.Token.Succeeded ? "issued" : $"refused: {i.Token.ErrorCode}",
+                i.Token.StateText,
                 Status(i.Site),
                 i.SiteId is null ? "-" : "resolved",
                 i.Site is null ? "" : i.Site.ElapsedMs.ToString(),

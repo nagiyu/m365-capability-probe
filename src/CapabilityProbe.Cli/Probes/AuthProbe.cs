@@ -5,9 +5,15 @@ using CapabilityProbe.Reporting;
 namespace CapabilityProbe.Probes;
 
 /// <summary>
-/// Asks for a token in all three audiences, twice over - once as the app, once as a person - and
-/// reports the six answers. Nothing is called with the tokens; this subcommand only records which
+/// Asks for a token in all three audiences, three times over - twice as the app, once as a person -
+/// and reports the nine answers. Nothing is called with the tokens; this subcommand only records which
 /// doors the app registration is allowed to knock on, and what it is holding when it gets in.
+/// <para>
+/// The two app rows are the same app registration with the same grants, differing only in how it
+/// proved itself to Entra: a shared secret, or a private key. Holding them side by side in one run is
+/// what makes the comparison worth anything - if the answers differ, nothing else was available to
+/// differ.
+/// </para>
 /// <para>
 /// It states no expectation about any of that. What the grants ought to produce is an argument about
 /// a particular tenant, and it belongs in prose where it can carry a date and a reason.
@@ -19,7 +25,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         [ProbeAudience.Graph, ProbeAudience.SharePoint, ProbeAudience.AzureRms];
 
     private static readonly ProbeMode[] Modes =
-        [ProbeMode.AppOnly, ProbeMode.Delegated];
+        [ProbeMode.AppOnly, ProbeMode.AppOnlyCertificate, ProbeMode.Delegated];
 
     public async Task<ProbeReport> RunAsync(CancellationToken cancellationToken)
     {
@@ -31,11 +37,28 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 
         var results = new Dictionary<(ProbeAudience, ProbeMode), TokenResult?>();
 
-        var appOnly = new AppOnlyTokenSource(options);
-        console.WriteLine("Requesting app-only tokens (client credentials, no user)...");
+        var appOnly = AppOnlyTokenSource.WithSecret(options);
+        console.WriteLine("Requesting app-only tokens (client credentials, shared secret)...");
         foreach (var audience in Audiences)
         {
             results[(audience, ProbeMode.AppOnly)] = await appOnly.GetTokenAsync(audience, cancellationToken);
+        }
+
+        // The certificate leg is built whether or not a certificate is configured. An absent one is
+        // reported as the reason no token was requested, which is a different statement from the leg
+        // simply not appearing.
+        var appOnlyCertificate = AppOnlyTokenSource.WithCertificate(options);
+        report.Subject["secret"] = appOnly.Identity;
+        report.Subject["cert"] = appOnlyCertificate.Identity;
+
+        console.WriteLine(appOnlyCertificate.IsUnavailable
+            ? $"Skipping the certificate leg: {appOnlyCertificate.Identity}"
+            : "Requesting app-only tokens (client credentials, certificate)...");
+
+        foreach (var audience in Audiences)
+        {
+            results[(audience, ProbeMode.AppOnlyCertificate)] =
+                await appOnlyCertificate.GetTokenAsync(audience, cancellationToken);
         }
 
         var delegated = new DelegatedTokenSource(options, console);
@@ -80,6 +103,11 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             }
         }
 
+        foreach (var audience in Audiences)
+        {
+            report.Add(BuildSecretVersusCertificate(audience, results));
+        }
+
         report.Finish();
         return report;
     }
@@ -87,18 +115,15 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
     private ProbeTable BuildMatrix(IReadOnlyDictionary<(ProbeAudience, ProbeMode), TokenResult?> results)
     {
         var rows = Audiences
-            .Select(audience => (IReadOnlyList<string?>)new[]
-            {
-                audience.Display(),
-                ScopeResolver.Resolve(audience, options),
-                MatrixCell(results[(audience, ProbeMode.AppOnly)]),
-                MatrixCell(results[(audience, ProbeMode.Delegated)]),
-            })
+            .Select(audience => (IReadOnlyList<string?>)
+                new[] { audience.Display(), ScopeResolver.Resolve(audience, options) }
+                    .Concat(Modes.Select(mode => MatrixCell(results[(audience, mode)])))
+                    .ToArray())
             .ToList();
 
         return new ProbeTable(
             "What the app holds",
-            ["audience", "scope", "app-only", "delegated"],
+            ["audience", "scope", .. Modes.Select(m => m.Display())],
             rows);
     }
 
@@ -111,7 +136,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 
         var text = result switch
         {
-            { Succeeded: false } => $"refused: {result.ErrorCode}",
+            { Succeeded: false } => result.StateText,
             { Claims: null } => "token, claims unreadable",
             { Claims.CarriesPermission: false } => "token, but nothing granted",
             _ => $"token, {result.Claims.GrantSummary()}",
@@ -133,8 +158,9 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                 {
                     audience.Display(),
                     mode.Display(),
-                    result is null ? "NotRun" : result.Succeeded ? "issued" : "refused",
+                    result is null ? "NotRun" : result.StateText,
                     result?.Claims?.GrantSummary() ?? (result?.Succeeded == true ? "(claims unreadable)" : ""),
+                    result?.Claims?.CredentialClassText ?? "",
                     result?.Claims?.Audience ?? "",
                     result?.Claims?.SignedInAs ?? "",
                     result?.ErrorCode ?? "",
@@ -146,7 +172,7 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
 
         return new ProbeTable(
             "Token requests in detail (token claims are read, not verified - this tool is not their audience)",
-            ["audience", "mode", "token", "granted", "aud claim", "upn claim", "error code", "ms", "error detail"],
+            ["audience", "mode", "token", "granted", "how it authenticated", "aud claim", "upn claim", "error code", "ms", "error detail"],
             rows);
     }
 
@@ -170,7 +196,13 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             _ => $"token issued carrying {result.Claims.GrantSummary()} ({timing})",
         };
 
-        return Observation.Measured(subject, observed) with
+        // A request that never left the machine measured nothing about the tenant. It is a fact about
+        // the setup, and it belongs in the same column as every other step that could not be reached.
+        var outcome = result.Requested
+            ? Observation.Measured(subject, observed)
+            : Observation.NotRun(subject, $"no request was issued: {result.ErrorDetail}");
+
+        return outcome with
         {
             Details = new Dictionary<string, string?>
             {
@@ -182,6 +214,8 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
                 ["audClaim"] = result.Claims?.Audience,
                 ["roles"] = result.Claims is null ? null : string.Join(' ', result.Claims.Roles),
                 ["scp"] = result.Claims is null ? null : string.Join(' ', result.Claims.Scopes),
+                ["credentialClassClaim"] = result.Claims?.CredentialClassClaim,
+                ["credentialClass"] = result.Claims?.CredentialClass,
                 ["signedInAs"] = result.Claims?.SignedInAs,
                 ["errorCode"] = result.ErrorCode,
                 ["errorDetail"] = result.ErrorDetail,
@@ -190,4 +224,45 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             },
         };
     }
+
+    /// <summary>
+    /// The two app rows for one audience, set against each other. Same tenant, same client, same
+    /// grants, same moment - only the proof of identity differs, so a difference between these two
+    /// cells has nowhere else to come from.
+    /// </summary>
+    private static Observation BuildSecretVersusCertificate(
+        ProbeAudience audience,
+        IReadOnlyDictionary<(ProbeAudience, ProbeMode), TokenResult?> results)
+    {
+        var subject = $"{audience.Display()}: secret vs certificate";
+
+        var secret = results[(audience, ProbeMode.AppOnly)];
+        var certificate = results[(audience, ProbeMode.AppOnlyCertificate)];
+
+        if (certificate is { Succeeded: false, ErrorCode: "NoCertificateConfigured" })
+        {
+            return Observation.NotRun(subject, "no certificate is configured, so there is nothing to compare against");
+        }
+
+        return Observation.Measured(subject, $"secret {Side(secret)}; certificate {Side(certificate)}") with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["audience"] = audience.Display(),
+                ["secretGranted"] = secret?.Claims?.GrantSummary(),
+                ["secretAud"] = secret?.Claims?.Audience,
+                ["certificateGranted"] = certificate?.Claims?.GrantSummary(),
+                ["certificateAud"] = certificate?.Claims?.Audience,
+            },
+        };
+    }
+
+    private static string Side(TokenResult? result) => result switch
+    {
+        null => "NotRun",
+        { Succeeded: false } => result.StateText,
+        { Claims: null } => "token, claims unreadable",
+        { Claims.CarriesPermission: false } => "token, nothing granted",
+        _ => $"token, {result.Claims.GrantSummary()}",
+    };
 }

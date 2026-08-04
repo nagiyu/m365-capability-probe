@@ -93,6 +93,18 @@ public static class ProbeOptionsLoader
             }
         }
 
+        // A password with nothing to unlock is the shape a half-finished setup takes: the certificate
+        // path was removed, or never set, and the run silently loses a leg it was meant to have. It
+        // stops nothing, so it does not block a subcommand - but going unsaid, it reads as a tool that
+        // ignored what it was given.
+        if (!string.IsNullOrWhiteSpace(options.ClientCertificatePassword) && !options.HasCertificate)
+        {
+            problems.Add(new ConfigurationProblem(
+                "ClientCertificatePassword",
+                "set, but ClientCertificatePath is empty, so there is no certificate for it to open",
+                []));
+        }
+
         foreach (var file in options.Files.Where(f => !f.StartsWith('/')))
         {
             problems.Add(new ConfigurationProblem(
@@ -123,13 +135,17 @@ public static class ProbeOptionsLoader
     /// </summary>
     public static void WriteProblems(TextWriter writer, IReadOnlyList<ConfigurationProblem> problems)
     {
-        writer.WriteLine("Configuration is incomplete. Nothing was probed.");
+        // Whether this stops the run is decided by the caller, so this says what is wrong and not
+        // what became of the run. Not every gap blocks something.
+        writer.WriteLine("Configuration has gaps.");
         writer.WriteLine();
         writer.WriteLine("Missing or invalid keys:");
         foreach (var problem in problems)
         {
-            writer.WriteLine($"  {problem.Key,-18} {problem.Detail}");
-            writer.WriteLine($"  {"",-18} blocks: {string.Join(", ", problem.BlockedCommands)}");
+            writer.WriteLine($"  {problem.Key,-26} {problem.Detail}");
+            writer.WriteLine($"  {"",-26} blocks: " + (problem.BlockedCommands.Count == 0
+                ? "nothing - worth saying, not worth stopping for"
+                : string.Join(", ", problem.BlockedCommands)));
         }
 
         writer.WriteLine();

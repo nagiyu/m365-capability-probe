@@ -17,8 +17,34 @@ public sealed record TokenClaims(
     string? AppId,
     string? SignedInAs,
     IReadOnlyList<string> Roles,
-    IReadOnlyList<string> Scopes)
+    IReadOnlyList<string> Scopes,
+    string? CredentialClass)
 {
+    /// <summary>
+    /// The claim name this token used to say how the app authenticated, or null when it said nothing.
+    /// Kept alongside the value because the two spellings belong to different token versions, and a
+    /// report that flattened them would lose which kind of token it was reading.
+    /// </summary>
+    public string? CredentialClassClaim { get; init; }
+
+    /// <summary>
+    /// How the app proved itself, as the issuer recorded it - <c>appidacr</c> in a v1 token,
+    /// <c>azpacr</c> in a v2 one.
+    /// <para>
+    /// The raw value, not a translation of it. Entra publishes what the numbers mean, but this probe
+    /// did not measure that mapping, and a report that printed "certificate" where the token said
+    /// <c>2</c> would be passing off a lookup as an observation. The same rule the group membership
+    /// summaries follow for <c>PrincipalType</c>.
+    /// </para>
+    /// <para>
+    /// It is read at all because it is the one claim that differs between two tokens for the same app,
+    /// the same tenant and the same roles, requested seconds apart. Without it, two identical-looking
+    /// grants getting different answers from a resource has nothing in the report to hang on.
+    /// </para>
+    /// </summary>
+    public string? CredentialClassText =>
+        CredentialClass is null ? null : $"{CredentialClassClaim}: {CredentialClass}";
+
     /// <summary>True when the token carries at least one application role or delegated scope.</summary>
     public bool CarriesPermission => Roles.Count > 0 || Scopes.Count > 0;
 
@@ -78,12 +104,20 @@ public static class TokenClaimsReader
             using var document = JsonDocument.Parse(payload);
             var root = document.RootElement;
 
+            // v1 tokens spell it 'appidacr', v2 tokens 'azpacr'. Which one is present is itself worth
+            // keeping: it says which token version the resource is being handed.
+            var credentialClaim = ReadScalar(root, "appidacr") is not null ? "appidacr" : "azpacr";
+
             return new TokenClaims(
                 Audience: ReadString(root, "aud"),
                 AppId: ReadString(root, "appid") ?? ReadString(root, "azp"),
                 SignedInAs: ReadString(root, "upn") ?? ReadString(root, "preferred_username"),
                 Roles: ReadStringList(root, "roles"),
-                Scopes: ReadStringList(root, "scp"));
+                Scopes: ReadStringList(root, "scp"),
+                CredentialClass: ReadScalar(root, credentialClaim))
+            {
+                CredentialClassClaim = credentialClaim,
+            };
         }
         catch (JsonException)
         {
@@ -109,6 +143,22 @@ public static class TokenClaimsReader
     private static string? ReadString(JsonElement root, string name) =>
         root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
+            : null;
+
+    /// <summary>
+    /// A claim whose value is written as text, taken as text whichever way it was written. Entra sends
+    /// the authentication-class claims as strings, but they read as numbers, and a report that dropped
+    /// one because a token spelled it <c>2</c> instead of <c>"2"</c> would be reporting an absence
+    /// that is not there.
+    /// </summary>
+    private static string? ReadScalar(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value)
+            ? value.ValueKind switch
+            {
+                JsonValueKind.String => value.GetString(),
+                JsonValueKind.Number => value.GetRawText(),
+                _ => null,
+            }
             : null;
 
     /// <summary>Entra writes 'roles' as an array and 'scp' as a space separated string. Accept either.</summary>

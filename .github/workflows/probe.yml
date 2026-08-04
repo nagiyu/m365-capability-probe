@@ -62,6 +62,36 @@ jobs:
       - name: Build
         run: dotnet build M365CapabilityProbe.sln -c Release
 
+      # The certificate leg needs a file, and a repository secret is a string. Base64 in the secret,
+      # a file on the runner, and the path handed over the same way every other setting is - so the
+      # tool has one input and one code path whether it runs here or on a laptop.
+      #
+      # Written under RUNNER_TEMP, which is wiped with the runner. Nothing is committed, and the
+      # path never leaves this job.
+      - name: Materialise the client certificate
+        env:
+          PFX_BASE64: ${{ secrets.PROBE_CLIENTCERTIFICATE }}
+        run: |
+          set -eu
+
+          # The absence of the secret is not an error. It is the ordinary case, and the report says
+          # so on its own - so this step reports it too rather than looking like it did something.
+          if [ -z "${PFX_BASE64:-}" ]; then
+            echo "No PROBE_CLIENTCERTIFICATE secret is set."
+            echo "The certificate leg will report itself as not run, with that as the reason."
+            exit 0
+          fi
+
+          # Whitespace is stripped first: base64 wrapped at 76 characters is the same value as base64
+          # on one line, and which one lands in the secret depends on which tool produced it.
+          # A PEM-style BEGIN/END block is not handled - those lines are not whitespace, and a
+          # certificate that decodes to nothing would be worse than one that fails here.
+          printf '%s' "$PFX_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/probe.pfx"
+          echo "PROBE_CLIENTCERTIFICATEPATH=$RUNNER_TEMP/probe.pfx" >> "$GITHUB_ENV"
+          echo "Wrote a $(wc -c < "$RUNNER_TEMP/probe.pfx") byte certificate file."
+          echo "If it is not a PKCS#12 file, or the password is wrong, the report says so as a"
+          echo "not-run row with the reason. It does not fail the job: that is a measurement too."
+
       - name: Say what to watch for
         run: |
           echo "The next step requests app-only tokens first, then stops and prints a device code."
@@ -74,11 +104,14 @@ jobs:
         # wait for a person and not to the job as a whole.
         timeout-minutes: 20
         env:
-          # Only the three values that never change per run are secrets. SiteUrl, FilePaths and
+          # Only the values that never change per run are secrets. SiteUrl, FilePaths and
           # DelegatedUserHint are what a given run is about, so they are dispatch inputs.
+          # PROBE_CLIENTCERTIFICATEPATH is not here: the step above puts it in the environment, and
+          # only when there was a certificate to write.
           PROBE_TENANTID: ${{ secrets.PROBE_TENANTID }}
           PROBE_CLIENTID: ${{ secrets.PROBE_CLIENTID }}
           PROBE_CLIENTSECRET: ${{ secrets.PROBE_CLIENTSECRET }}
+          PROBE_CLIENTCERTIFICATEPASSWORD: ${{ secrets.PROBE_CLIENTCERTIFICATEPASSWORD }}
           PROBE_SITEURL: ${{ inputs.site_url }}
           PROBE_FILEPATHS: ${{ inputs.file_paths }}
           PROBE_DELEGATEDUSERHINT: ${{ inputs.delegated_user_hint }}

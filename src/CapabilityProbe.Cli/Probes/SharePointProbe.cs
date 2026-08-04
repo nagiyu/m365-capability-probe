@@ -56,6 +56,8 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             Results.FirstOrDefault(r => r.Step.Name == stepName).Observation;
     }
 
+    private static readonly ProbeAudience[] Audiences = [ProbeAudience.SharePoint, ProbeAudience.Graph];
+
     private const string WebStep = "SP GET /_api/web";
     private const string CurrentUserStep = "SP GET /_api/web/currentuser";
     private const string SiteGroupsStep = "SP GET /_api/web/sitegroups";
@@ -85,13 +87,21 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             new(SiteGroupsStep, ProbeAudience.SharePoint, $"{siteUrl}/_api/web/sitegroups", SharePointResponses.Groups),
         ];
 
-        console.WriteLine("Establishing the application identity (client credentials)...");
-        var appOnlySource = new AppOnlyTokenSource(options);
-        var appOnlyTokens = new Dictionary<ProbeAudience, TokenResult>
-        {
-            [ProbeAudience.SharePoint] = await appOnlySource.GetTokenAsync(ProbeAudience.SharePoint, cancellationToken),
-            [ProbeAudience.Graph] = await appOnlySource.GetTokenAsync(ProbeAudience.Graph, cancellationToken),
-        };
+        console.WriteLine("Establishing the application identity (client credentials, shared secret)...");
+        var secretSource = AppOnlyTokenSource.WithSecret(options);
+        var secretTokens = await TokensFor(secretSource, cancellationToken);
+
+        // The same app registration proving itself with a key instead. Built whether or not a
+        // certificate is configured: an absent one is reported as the reason the leg holds nothing,
+        // which is a different statement from the leg not being in the report at all.
+        var certificateSource = AppOnlyTokenSource.WithCertificate(options);
+        console.WriteLine(certificateSource.IsUnavailable
+            ? $"Skipping the certificate identity: {certificateSource.Identity}"
+            : "Establishing the application identity (client credentials, certificate)...");
+        var certificateTokens = await TokensFor(certificateSource, cancellationToken);
+
+        report.Subject["secret"] = secretSource.Identity;
+        report.Subject["cert"] = certificateSource.Identity;
 
         console.WriteLine("Establishing the delegated identity (device code)...");
         var delegatedSource = new DelegatedTokenSource(options, console);
@@ -117,31 +127,34 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
         };
 
         // The grant being measured, in the report's own header. A stack of these compares without
-        // anyone remembering which run had which permissions.
-        report.Subject["app roles"] = appOnlyTokens[ProbeAudience.SharePoint].Claims switch
-        {
-            null => "(no readable SharePoint token)",
-            { Roles.Count: 0 } => "(none)",
-            var claims => string.Join(' ', claims.Roles),
-        };
+        // anyone remembering which run had which permissions. Both app legs are read: they are the
+        // same registration and ought to carry the same roles, and if they ever do not, the header is
+        // where that has to show rather than the reader assuming one stands for both.
+        report.Subject["app roles"] = RolesHeader(secretTokens, certificateTokens);
 
-        var appOnly = new Leg { Mode = ProbeMode.AppOnly, Tokens = appOnlyTokens };
-        var delegated = new Leg { Mode = ProbeMode.Delegated, Tokens = delegatedTokens };
+        var legs = new[]
+        {
+            new Leg { Mode = ProbeMode.AppOnly, Tokens = secretTokens },
+            new Leg { Mode = ProbeMode.AppOnlyCertificate, Tokens = certificateTokens },
+            new Leg { Mode = ProbeMode.Delegated, Tokens = delegatedTokens },
+        };
 
         foreach (var step in fixedSteps)
         {
-            console.WriteLine($"{step.Name} as both identities...");
-            await RunStepAsync(appOnly, step, cancellationToken);
-            await RunStepAsync(delegated, step, cancellationToken);
+            console.WriteLine($"{step.Name} as every identity...");
+            foreach (var leg in legs)
+            {
+                await RunStepAsync(leg, step, cancellationToken);
+            }
         }
 
         // The chained call. Whichever identity managed to list the groups supplies the ID, and the
         // report says which one did - because an identity that was refused the listing cannot produce
         // an ID of its own, and leaving its membership call unmeasured would drop the very question
-        // this run is asking. Borrowing the ID lets both be asked the same thing.
-        var (groupId, groupSource) = PickGroupId(appOnly, delegated);
+        // this run is asking. Borrowing the ID lets all of them be asked the same thing.
+        var (groupId, groupSource) = PickGroupId(legs);
         report.Subject["group id"] = groupId is null
-            ? "(no group id - neither identity could list the site groups)"
+            ? "(no group id - no identity could list the site groups)"
             : $"{groupId} (discovered by {groupSource})";
 
         if (groupId is not null)
@@ -152,24 +165,28 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                 $"{siteUrl}/_api/web/sitegroups({groupId})/users",
                 SharePointResponses.Users);
 
-            console.WriteLine($"{step.Name} as both identities...");
-            await RunStepAsync(appOnly, step, cancellationToken);
-            await RunStepAsync(delegated, step, cancellationToken);
+            console.WriteLine($"{step.Name} as every identity...");
+            foreach (var leg in legs)
+            {
+                await RunStepAsync(leg, step, cancellationToken);
+            }
         }
         else
         {
             var step = new Step(GroupUsersStep, ProbeAudience.SharePoint, "(not built)", _ => "");
-            appOnly.Results.Add((step, null));
-            delegated.Results.Add((step, null));
+            foreach (var leg in legs)
+            {
+                leg.Results.Add((step, null));
+            }
         }
 
-        report.Add(BuildHoldsTable(appOnly, delegated));
-        report.Add(BuildHonoursTable(appOnly, delegated));
-        report.Add(BuildCallTable(appOnly, delegated));
+        report.Add(BuildHoldsTable(legs));
+        report.Add(BuildHonoursTable(legs));
+        report.Add(BuildCallTable(legs));
 
-        foreach (var leg in new[] { appOnly, delegated })
+        foreach (var leg in legs)
         {
-            foreach (var audience in new[] { ProbeAudience.SharePoint, ProbeAudience.Graph })
+            foreach (var audience in Audiences)
             {
                 report.Add(TokenObservation(leg, audience));
             }
@@ -180,13 +197,51 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             }
         }
 
-        foreach (var (step, _) in appOnly.Results)
+        foreach (var (step, _) in legs[0].Results)
         {
-            report.Add(ContrastObservation(step, appOnly, delegated));
+            report.Add(ContrastObservation(step, legs));
         }
 
         report.Finish();
         return report;
+    }
+
+    private static async Task<IReadOnlyDictionary<ProbeAudience, TokenResult>> TokensFor(
+        AppOnlyTokenSource source,
+        CancellationToken cancellationToken)
+    {
+        var tokens = new Dictionary<ProbeAudience, TokenResult>();
+        foreach (var audience in Audiences)
+        {
+            tokens[audience] = await source.GetTokenAsync(audience, cancellationToken);
+        }
+
+        return tokens;
+    }
+
+    /// <summary>
+    /// What the app registration was granted, as both app legs saw it. One line when they agree,
+    /// because they normally do and a header that repeats itself is noise; both spelled out when they
+    /// do not, because then the disagreement is the more interesting fact in the run.
+    /// </summary>
+    private static string RolesHeader(
+        IReadOnlyDictionary<ProbeAudience, TokenResult> secret,
+        IReadOnlyDictionary<ProbeAudience, TokenResult> certificate)
+    {
+        var fromSecret = Roles(secret);
+        var fromCertificate = Roles(certificate);
+
+        return fromSecret == fromCertificate
+            ? fromSecret
+            : $"secret: {fromSecret} / cert: {fromCertificate}";
+
+        static string Roles(IReadOnlyDictionary<ProbeAudience, TokenResult> tokens) =>
+            tokens[ProbeAudience.SharePoint].Claims switch
+            {
+                null => "(no readable SharePoint token)",
+                { Roles.Count: 0 } => "(none)",
+                var claims => string.Join(' ', claims.Roles),
+            };
     }
 
     private async Task RunStepAsync(Leg leg, Step step, CancellationToken cancellationToken)
@@ -202,12 +257,13 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     }
 
     /// <summary>
-    /// A site group ID for the membership call, and which identity's answer it came from. app-only is
-    /// preferred so the run uses its own answer when it has one; the borrow is the fallback.
+    /// A site group ID for the membership call, and which identity's answer it came from. The legs are
+    /// tried in order, so an identity that listed the groups itself supplies its own ID; the borrow is
+    /// the fallback for the ones that were refused the listing.
     /// </summary>
-    private static (string? Id, string Source) PickGroupId(Leg appOnly, Leg delegatedLeg)
+    private static (string? Id, string Source) PickGroupId(IReadOnlyList<Leg> legs)
     {
-        foreach (var leg in new[] { appOnly, delegatedLeg })
+        foreach (var leg in legs)
         {
             var id = SharePointResponses.FirstGroupId(leg.Find(SiteGroupsStep));
             if (id is not null)
@@ -222,21 +278,22 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     private static string EscapePath(string path) =>
         string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
 
-    private static ProbeTable BuildHoldsTable(Leg appOnly, Leg delegatedLeg)
+    private static ProbeTable BuildHoldsTable(IReadOnlyList<Leg> legs)
     {
         var rows = new List<IReadOnlyList<string?>>();
 
-        foreach (var audience in new[] { ProbeAudience.SharePoint, ProbeAudience.Graph })
+        foreach (var audience in Audiences)
         {
-            foreach (var leg in new[] { appOnly, delegatedLeg })
+            foreach (var leg in legs)
             {
                 var token = leg.Tokens[audience];
                 rows.Add(new[]
                 {
                     audience.Display(),
                     leg.Mode.Display(),
-                    token.Succeeded ? "issued" : $"refused: {token.ErrorCode}",
+                    token.StateText,
                     token.Claims?.GrantSummary() ?? (token.Succeeded ? "(claims unreadable)" : ""),
+                    token.Claims?.CredentialClassText ?? "",
                     token.Claims?.Audience ?? "",
                 });
             }
@@ -244,17 +301,17 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
 
         return new ProbeTable(
             "What Entra issued (claims are read, not verified - this tool is not their audience)",
-            ["audience", "mode", "token", "granted", "aud claim"],
+            ["audience", "mode", "token", "granted", "how it authenticated", "aud claim"],
             rows);
     }
 
-    private static ProbeTable BuildHonoursTable(Leg appOnly, Leg delegatedLeg)
+    private static ProbeTable BuildHonoursTable(IReadOnlyList<Leg> legs)
     {
         var rows = new List<IReadOnlyList<string?>>();
 
-        foreach (var (step, _) in appOnly.Results)
+        foreach (var (step, _) in legs[0].Results)
         {
-            foreach (var leg in new[] { appOnly, delegatedLeg })
+            foreach (var leg in legs)
             {
                 var observation = leg.Find(step.Name);
                 rows.Add(new[]
@@ -274,11 +331,11 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
             rows);
     }
 
-    private static ProbeTable BuildCallTable(Leg appOnly, Leg delegatedLeg)
+    private static ProbeTable BuildCallTable(IReadOnlyList<Leg> legs)
     {
         var rows = new List<IReadOnlyList<string?>>();
 
-        foreach (var leg in new[] { appOnly, delegatedLeg })
+        foreach (var leg in legs)
         {
             foreach (var (step, observation) in leg.Results.Where(r => r.Observation is not null))
             {
@@ -308,16 +365,22 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
 
         if (!token.Succeeded)
         {
-            return Observation.Measured(subject, $"refused with {token.ErrorCode}") with
+            // A request that was never issued is not a measurement of Entra, so it is not recorded as
+            // one. The reason still travels with it, in the row that says nothing was measured.
+            var details = new Dictionary<string, string?>
             {
-                Details = new Dictionary<string, string?>
-                {
-                    ["audience"] = audience.Display(),
-                    ["mode"] = leg.Mode.Display(),
-                    ["scope"] = token.Scope,
-                    ["errorCode"] = token.ErrorCode,
-                    ["errorDetail"] = token.ErrorDetail,
-                },
+                ["audience"] = audience.Display(),
+                ["mode"] = leg.Mode.Display(),
+                ["scope"] = token.Scope,
+                ["errorCode"] = token.ErrorCode,
+                ["errorDetail"] = token.ErrorDetail,
+            };
+
+            return (token.Requested
+                ? Observation.Measured(subject, $"refused with {token.ErrorCode}")
+                : Observation.NotRun(subject, $"no request was issued: {token.ErrorDetail}")) with
+            {
+                Details = details,
             };
         }
 
@@ -337,6 +400,8 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                 ["audClaim"] = token.Claims?.Audience,
                 ["roles"] = token.Claims is null ? null : string.Join(' ', token.Claims.Roles),
                 ["scp"] = token.Claims is null ? null : string.Join(' ', token.Claims.Scopes),
+                ["credentialClassClaim"] = token.Claims?.CredentialClassClaim,
+                ["credentialClass"] = token.Claims?.CredentialClass,
                 ["signedInAs"] = token.Claims?.SignedInAs,
             },
         };
@@ -348,11 +413,14 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
 
         if (observation is null)
         {
+            var token = leg.Tokens[step.Audience];
             return Observation.NotRun(
                 subject,
                 step.Url == "(not built)"
                     ? "no site group ID was available, so the membership URL was never built"
-                    : $"no {step.Audience.Display()} token was issued for this mode");
+                    : token.Requested
+                        ? $"no {step.Audience.Display()} token was issued for this mode: {token.ErrorCode}"
+                        : $"this identity never asked for a token: {token.ErrorDetail}");
         }
 
         var summary = step.Summarise(observation);
@@ -403,48 +471,56 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     }
 
     /// <summary>
-    /// What the token said, next to what the resource did about it, for one call and both identities.
-    /// A claim honoured and a claim declined look identical until the call is made.
+    /// What the resource did about the same call for every identity, on one line.
+    /// <para>
+    /// Three legs no longer fit next to what each one was granted, so this row carries the statuses
+    /// alone and the grants move into the details. The statuses are the part that has to survive a
+    /// terminal: two identities holding the same claim and getting different answers is the finding,
+    /// and it is unreadable if the end of the line is clipped away.
+    /// </para>
     /// </summary>
-    private static Observation ContrastObservation(Step step, Leg appOnly, Leg delegatedLeg)
+    private static Observation ContrastObservation(Step step, IReadOnlyList<Leg> legs)
     {
         var subject = $"{step.Name}: granted vs honoured";
 
-        var appResult = appOnly.Find(step.Name);
-        var delegatedResult = delegatedLeg.Find(step.Name);
-
-        if (appResult is null && delegatedResult is null)
+        if (legs.All(leg => leg.Find(step.Name) is null))
         {
-            return Observation.NotRun(subject, "neither identity reached this call");
+            return Observation.NotRun(subject, "no identity reached this call");
         }
 
-        return Observation.Measured(
-            subject,
-            $"app-only {Side(appOnly, step, appResult)}; delegated {Side(delegatedLeg, step, delegatedResult)}") with
+        var details = new Dictionary<string, string?>
         {
-            Details = new Dictionary<string, string?>
-            {
-                ["call"] = step.Name,
-                ["audience"] = step.Audience.Display(),
-                ["appOnlyGranted"] = appOnly.Tokens[step.Audience].Claims?.GrantSummary(),
-                ["appOnlyStatus"] = appResult is null ? "NotRun" : appResult.StatusText,
-                ["delegatedGranted"] = delegatedLeg.Tokens[step.Audience].Claims?.GrantSummary(),
-                ["delegatedStatus"] = delegatedResult is null ? "NotRun" : delegatedResult.StatusText,
-            },
+            ["call"] = step.Name,
+            ["audience"] = step.Audience.Display(),
         };
+
+        foreach (var leg in legs)
+        {
+            var key = leg.Mode.ShortName();
+            details[$"{key}Granted"] = Granted(leg, step);
+            details[$"{key}Status"] = Status(leg.Find(step.Name));
+        }
+
+        var observed = string.Join(
+            "; ",
+            legs.Select(leg => $"{leg.Mode.ShortName()} {Status(leg.Find(step.Name))}"));
+
+        return Observation.Measured(subject, observed) with { Details = details };
     }
 
-    private static string Side(Leg leg, Step step, HttpObservation? observation)
+    private static string Status(HttpObservation? observation) =>
+        observation is null ? "NotRun" : observation.StatusText;
+
+    private static string Granted(Leg leg, Step step)
     {
         var token = leg.Tokens[step.Audience];
-        var granted = token.Claims switch
+        return token.Claims switch
         {
+            null when !token.Requested => "no request was issued",
             null when !token.Succeeded => "no token",
             null => "unreadable claims",
             { CarriesPermission: false } => "nothing granted",
             var claims => claims.GrantSummary(),
         };
-
-        return $"{granted} -> {(observation is null ? "NotRun" : observation.StatusText)}";
     }
 }
