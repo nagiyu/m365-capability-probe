@@ -64,6 +64,13 @@ public sealed class AccessProbe(ProbeOptions options, ProbeHttpClient http, Text
         // something it never measured.
         report.Subject["signed in"] = delegatedSource.SignedInAs ?? "(nobody - sign-in did not complete)";
 
+        if (!delegatedSource.IsSignedIn)
+        {
+            report.MarkIncomplete(
+                "the device code was printed but the sign-in was never completed, so the delegated half " +
+                "is empty for want of an identity rather than for want of an answer");
+        }
+
         var delegatedRun = await WalkAsync(ProbeMode.Delegated, delegatedToken, calls, cancellationToken);
 
         report.Add(BuildComparison(appOnlyRun, delegatedRun));

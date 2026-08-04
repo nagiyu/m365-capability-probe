@@ -111,9 +111,10 @@ public static class Program
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- auth");
         writer.WriteLine("  dotnet run --project src/CapabilityProbe.Cli -- access --FilePath=\"/drafts/q3.docx\"");
         writer.WriteLine();
-        writer.WriteLine("Exit codes say whether the probe finished measuring, not whether the tenant behaved.");
-        writer.WriteLine("A refusal, an empty list and a token carrying nothing are all successful measurements.");
-        writer.WriteLine("  0 everything was measured, 2 something never ran,");
+        writer.WriteLine("Exit codes say whether the probe could do its job, not whether the tenant behaved.");
+        writer.WriteLine("A refusal, an empty list, a 404 and a token carrying nothing are all measurements,");
+        writer.WriteLine("and so is a step left unreachable by one of them. All of those exit 0.");
+        writer.WriteLine("  0 the probe ran, 2 the delegated sign-in was never completed,");
         writer.WriteLine("  64 bad usage, 78 incomplete configuration, 130 cancelled.");
     }
 }

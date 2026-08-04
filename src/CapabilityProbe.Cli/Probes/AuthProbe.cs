@@ -46,6 +46,13 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         // measures that account's reach, and the report has to say so on its own months from now.
         report.Subject["signed in"] = delegated.SignedInAs ?? "(nobody - sign-in did not complete)";
 
+        if (!delegated.IsSignedIn)
+        {
+            report.MarkIncomplete(
+                "the device code was printed but the sign-in was never completed, so the delegated column " +
+                "is empty for want of an identity rather than for want of an answer");
+        }
+
         if (signIn.Succeeded)
         {
             foreach (var audience in Audiences)

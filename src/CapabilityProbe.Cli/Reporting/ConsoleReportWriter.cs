@@ -36,8 +36,14 @@ public sealed class ConsoleReportWriter(TextWriter writer)
 
         if (report.Count(MeasurementStatus.NotRun) > 0)
         {
-            writer.WriteLine("NotRun rows have no value at all - not a zero. Something stopped before reaching them,");
-            writer.WriteLine("and the row above each one usually says what.");
+            writer.WriteLine("NotRun rows have no value at all - not a zero. The measurement above each one made it");
+            writer.WriteLine("unreachable, and that measurement is the finding.");
+        }
+
+        if (report.IncompleteReason is not null)
+        {
+            writer.WriteLine();
+            writer.WriteLine($"INCOMPLETE: {report.IncompleteReason}.");
         }
 
         writer.WriteLine();
