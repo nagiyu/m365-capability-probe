@@ -61,7 +61,11 @@
 | Microsoft Graph | `Sites.Read.All` | アプリケーション | 済 |
 | Microsoft Graph | `Sites.Read.All` | 委任 | 済 |
 | Microsoft Graph | `User.Read` | 委任 | 済 (既定で付く) |
-| SharePoint | `Sites.Read.All` | アプリケーション | 済 |
+| SharePoint | `Sites.FullControl.All` | アプリケーション | 済 |
+
+SharePoint 側は当初 `Sites.Read.All` でした。**所見 5 の切り分けのために `Sites.FullControl.All` へ
+差し替えています** (変更履歴を参照)。Microsoft Graph 側は初版から変えていません ― 対照として固定して
+あります。
 
 **意図的に付与していないもの** ― これらの欠落が測定対象です。
 
@@ -189,7 +193,7 @@ D の `restricted/` フォルダは、**検証用利用者からは存在自体�
 | 2. app-only は空のトークンを発行される | Azure RMS が未付与 / **秘密度ラベルが公開済みで RMS が実際に動いている** |
 | 3. 権限一覧は 403 ではなく 200 / 0 件 | 委任アカウントがサイトの **閲覧者**、ディレクトリ ロールなし / ファイル A・B・C の 3 通りの共有状態で確認 |
 | 4. 見えないファイルは 404 itemNotFound | ファイル D のフォルダで継承を中止し、閲覧者グループを削除している |
-| 5. app-only は SharePoint REST に 401、委任は 200 | SharePoint `Sites.Read.All` が**アプリケーション**として付与済み / SharePoint の**委任**は未付与 |
+| 5. app-only は SharePoint REST に 401、委任は 200 | SharePoint のアプリケーション付与が `Sites.Read.All` でも `Sites.FullControl.All` でも同じ / SharePoint の**委任**は未付与 |
 | 6. グループは一覧できるが中身は 403 | 委任アカウントがサイトの **閲覧者** / 対象は ID の若いグループ 1 つ |
 
 所見 3 は特に、閲覧者という役割に強く依存しています。メンバーや所有者で同じ測定をすると別の数字が
@@ -206,3 +210,4 @@ D の `restricted/` フォルダは、**検証用利用者からは存在自体�
 | 2026-08-04 | 共有状態の違うファイルを 3 つ追加 (B: 本人に直接付与 / C: 組織内リンク / D: 継承を切ったフォルダ内)。所見 3 が共有状態に依存しないことが確認でき、所見 4 (見えないファイルは 404 itemNotFound) が出た |
 | 2026-08-04 | 環境は変えずに `sharepoint` サブコマンドを実行。所見 5 (app-only は SharePoint REST に 401、委任は 200) が出た。テナント側の設定変更はしていない |
 | 2026-08-04 | 呼び出しを増やした `sharepoint` を実行 (構成は `Sites.Read.All` アプリケーションのまま)。所見 6 が出た。あわせて、サイトのグループが 3 つから 6 つに増えていることが判明 ― 所見 4 のためのフォルダ継承の切断が原因と見られる。**測定が環境を変えていた** |
+| 2026-08-04 | **アプリの SharePoint アクセス許可を `Sites.Read.All` から `Sites.FullControl.All` (アプリケーション) へ差し替えて管理者同意。** Microsoft Graph 側は変更なし。同じ測定を繰り返し、app-only の `401` が一切変わらないことを確認 (所見 5 の追試 2)。**この付与はテナント内の全サイト コレクションへのフル コントロールなので、測定後に外すこと** |
