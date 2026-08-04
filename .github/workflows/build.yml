@@ -6,9 +6,10 @@
 # push - unlike every other subcommand here, which needs credentials and a person's judgement.
 name: build
 
+# Pull requests and dispatch only. A wildcard push trigger alongside pull_request fires both on the
+# same commit, which was not a guess - the first run of this workflow produced two of every job, and
+# the expensive one builds a container image.
 on:
-  push:
-    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
