@@ -135,8 +135,11 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
     {
         if (!observation.IsSuccess)
         {
+            // SharePoint refuses a token it will not accept with an empty body, and puts the reason in
+            // the headers instead. Falling back to them is the difference between recording why it was
+            // refused and recording that nobody knows.
             var code = ApiError.Code(observation);
-            return code.Length == 0 ? "" : code;
+            return code.Length > 0 ? code : observation.RefusalDiagnostic ?? "(no reason given)";
         }
 
         if (string.IsNullOrWhiteSpace(observation.Body))
@@ -218,14 +221,16 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                     observation.StatusText,
                     observation.ElapsedMs.ToString(),
                     ApiError.Code(observation),
-                    ApiError.Message(observation),
+                    observation.IsSuccess
+                        ? ""
+                        : ApiError.Message(observation) is { Length: > 0 } m ? m : observation.RefusalDiagnostic ?? "",
                 });
             }
         }
 
         return new ProbeTable(
             $"Calls issued (every one carried 'Authorization: Bearer <token>' and 'Accept: {Accept}')",
-            ["mode", "method", "url", "status", "ms", "error code", "error message"],
+            ["mode", "method", "url", "status", "ms", "error code", "why it was refused"],
             rows);
     }
 
@@ -291,6 +296,7 @@ public sealed class SharePointProbe(ProbeOptions options, ProbeHttpClient http, 
                 ["status"] = observation.StatusText,
                 ["errorCode"] = ApiError.Code(observation),
                 ["errorMessage"] = ApiError.Message(observation),
+                ["responseHeaders"] = string.Join(" | ", observation.ResponseHeaders.Select(h => $"{h.Key}: {h.Value}")),
                 ["elapsedMs"] = observation.ElapsedMs.ToString(),
             },
         };

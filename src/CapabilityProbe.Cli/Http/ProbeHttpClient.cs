@@ -19,7 +19,22 @@ public sealed record HttpObservation(
     long ElapsedMs,
     string? TransportError)
 {
+    /// <summary>
+    /// The few response headers that carry a reason rather than plumbing. Some refusals put their
+    /// entire explanation here and leave the body empty - a 401 from SharePoint says why in
+    /// <c>WWW-Authenticate</c> and <c>x-ms-diagnostics</c> and nowhere else. Dropping them would mean
+    /// recording "refused, no idea why" about a service that did in fact say why.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ResponseHeaders { get; init; } =
+        new Dictionary<string, string>();
+
     public bool IsSuccess => StatusCode is >= 200 and < 300;
+
+    /// <summary>Whatever the service said about why it refused, from the headers rather than the body.</summary>
+    public string? RefusalDiagnostic =>
+        ResponseHeaders.TryGetValue("x-ms-diagnostics", out var diagnostics) ? diagnostics
+        : ResponseHeaders.TryGetValue("WWW-Authenticate", out var challenge) ? challenge
+        : null;
 
     public string StatusText => StatusCode is null
         ? $"(no response: {TransportError})"
@@ -33,6 +48,22 @@ public sealed record HttpObservation(
 public sealed class ProbeHttpClient : IDisposable
 {
     private const int MaxRecordedBodyLength = 4000;
+
+    /// <summary>
+    /// Response headers worth keeping. An allow list rather than everything, because most of what a
+    /// service returns is transport bookkeeping and the point of the record is to stay readable.
+    /// The first two explain refusals; the rest are what a support request would ask for.
+    /// </summary>
+    private static readonly string[] InterestingResponseHeaders =
+    [
+        "WWW-Authenticate",
+        "x-ms-diagnostics",
+        "x-ms-ags-diagnostic",
+        "request-id",
+        "client-request-id",
+        "SPRequestGuid",
+        "Retry-After",
+    ];
 
     private readonly HttpClient _http;
 
@@ -81,7 +112,10 @@ public sealed class ProbeHttpClient : IDisposable
                 ReasonPhrase: response.ReasonPhrase ?? ((HttpStatusCode)response.StatusCode).ToString(),
                 Body: Truncate(body),
                 ElapsedMs: stopwatch.ElapsedMilliseconds,
-                TransportError: null);
+                TransportError: null)
+            {
+                ResponseHeaders = CollectHeaders(response),
+            };
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -96,6 +130,22 @@ public sealed class ProbeHttpClient : IDisposable
                 ElapsedMs: stopwatch.ElapsedMilliseconds,
                 TransportError: $"{ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static IReadOnlyDictionary<string, string> CollectHeaders(HttpResponseMessage response)
+    {
+        var collected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var name in InterestingResponseHeaders)
+        {
+            if (response.Headers.TryGetValues(name, out var values) ||
+                response.Content.Headers.TryGetValues(name, out values))
+            {
+                collected[name] = Truncate(string.Join(", ", values));
+            }
+        }
+
+        return collected;
     }
 
     private static string Truncate(string body) =>
