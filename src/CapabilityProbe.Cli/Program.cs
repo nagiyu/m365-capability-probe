@@ -61,6 +61,9 @@ public static class Program
                 ProbeOptionsLoader.MipCommand =>
                     await new MipProbe(Console.Out).RunAsync(cancellation.Token),
 
+                ProbeOptionsLoader.ConsumeCommand =>
+                    await new ConsumeProbe(configuration.Options, Console.Out).RunAsync(cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -126,6 +129,8 @@ public static class Program
         writer.WriteLine("              call per item? three candidate routes against the one-at-a-time baseline");
         writer.WriteLine("  mip         can this build reach the Information Protection SDK at all? needs no");
         writer.WriteLine("              configuration and no tenant - it asks about this machine, not about M365");
+        writer.WriteLine("  consume     open one protected file once per DelegatedUserEmail, plus once with the");
+        writer.WriteLine("              value unset, and report what licence the protection service issued");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

@@ -89,6 +89,33 @@ public sealed class ProbeOptions
     public bool RunDelegated =>
         !string.Equals(Identities.Trim(), AppOnlyIdentities, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Path to a protected file the <c>consume</c> subcommand should try to open.</summary>
+    public string ProtectedFilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Addresses to put in <c>FileEngineSettings.DelegatedUserEmail</c>, one leg each, separated by
+    /// <c>|</c>. A leg with the value unset is always added on top of these.
+    /// <para>
+    /// The tool is not told which of them is supposed to have rights. It runs each and reports what
+    /// came back; which one was the control is an argument about a tenant, and it belongs in prose.
+    /// </para>
+    /// </summary>
+    public string DelegatedUserEmails { get; set; } = string.Empty;
+
+    /// <summary>The addresses, split and trimmed.</summary>
+    public IReadOnlyList<string> DelegatedUsers =>
+        DelegatedUserEmails.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// Holds <c>FileEngineSettings.Identity</c> still while <c>DelegatedUserEmail</c> varies.
+    /// <para>
+    /// Left empty, the two move together, and a difference between legs is a fact about the pair.
+    /// Set, only one thing changes between legs - which is the stronger measurement and the reason
+    /// this knob exists. Either way the report says which was done.
+    /// </para>
+    /// </summary>
+    public string MipIdentityEmail { get; set; } = string.Empty;
+
     /// <summary>Host name taken from <see cref="SiteUrl"/>. Used to build the SharePoint scope.</summary>
     public string SiteHost =>
         Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;

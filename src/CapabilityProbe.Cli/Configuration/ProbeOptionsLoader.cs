@@ -19,9 +19,16 @@ public static class ProbeOptionsLoader
     public const string SharePointCommand = "sharepoint";
     public const string AclCommand = "acl";
     public const string MipCommand = "mip";
+    public const string ConsumeCommand = "consume";
 
     public static readonly string[] AllCommands =
-        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand];
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand];
+
+    /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
+    private static readonly string[] NeedsApp =
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand];
+
+    private static readonly string[] ConsumeOnly = [ConsumeCommand];
 
     /// <summary>
     /// The subcommands that talk to the tenant. They cannot run without an identity and a site.
@@ -68,12 +75,26 @@ public static class ProbeOptionsLoader
                 NeedsTenant));
         }
 
-        Require(problems, "TenantId", options.TenantId, NeedsTenant,
+        Require(problems, "TenantId", options.TenantId, NeedsApp,
             "directory (tenant) ID of the app registration");
-        Require(problems, "ClientId", options.ClientId, NeedsTenant,
+        Require(problems, "ClientId", options.ClientId, NeedsApp,
             "application (client) ID of the app registration");
         Require(problems, "ClientSecret", options.ClientSecret, NeedsTenant,
             "client secret; keep it in user-secrets, not in a committed file");
+        Require(problems, "ProtectedFilePath", options.ProtectedFilePath, ConsumeOnly,
+            "path to a protected file to open; inside the container this is under /work/samples");
+        Require(problems, "DelegatedUserEmails", options.DelegatedUserEmails, ConsumeOnly,
+            "one or more addresses to put in DelegatedUserEmail, separated by '|'; a leg with the value unset is always added");
+
+        // consume can prove itself either way, so neither credential is required on its own - but
+        // one of them has to be there, and saying which is missing beats a failure at token time.
+        if (string.IsNullOrWhiteSpace(options.ClientSecret) && !options.HasCertificate)
+        {
+            problems.Add(new ConfigurationProblem(
+                "ClientSecret / ClientCertificatePath",
+                "neither is set, and 'consume' needs one of them to authenticate as the app",
+                ConsumeOnly));
+        }
         Require(problems, "SiteUrl", options.SiteUrl, NeedsTenant,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
         // Only when there is a delegated leg to name an account for. A run narrowed to the app's own
