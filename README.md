@@ -404,6 +404,7 @@ app-only 側が 4 件見えているのと、同じアイテムの、同じ瞬�
 | `PROBE_CLIENTSECRET` | `ClientSecret` |
 | `PROBE_CLIENTCERTIFICATE` | (任意) `.pfx` を **base64 にしたもの** |
 | `PROBE_CLIENTCERTIFICATEPASSWORD` | (任意) その `.pfx` のパスワード |
+| `PROBE_PROTECTEDFILE` | (任意) `consume` で開く**保護済みファイルを base64 にしたもの** |
 
 証明書だけは扱いが違います。シークレットは文字列で、ツールが要るのはファイルなので、ワークフローは
 base64 を **ランナーの一時ディレクトリに書き出してから、そのパスを他の設定と同じ経路で渡します**。
@@ -425,6 +426,18 @@ base64 -w0 probe.pfx | pbcopy   # あるいは > probe.b64
 
 **シークレットを設定しなければ、証明書レグは「要求を出していない」として報告されます。** ジョブは
 失敗しません ― 証明書が無いこと自体が測定結果だからです。
+
+`PROBE_PROTECTEDFILE` も同じ扱いです。**ファイルもシークレットは文字列なので、base64 を書き出して
+パスだけ渡します。** 書き出すときのファイル名は dispatch の入力 (`protected_file_name`) で決めます ―
+**拡張子は SDK が見る**ので、`.docx` を `.bin` で渡すと別の答えが出ます。
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("probe-miku-only.docx")) | Set-Clipboard
+```
+
+**`consume` と `mip` は Actions で完結します。** ランナーは Ubuntu 24.04 で、SDK が link している
+3 つのパッケージだけワークフローが入れます (`mip` が実行時に確認している一覧と同じもの)。
+Docker は手元で回したいときのためのもので、Actions には要りません。
 
 **dispatch の `identities` は既定で `app-only` です。** ランナーにはブラウザも人もいないので、
 そちらを既定にしてあります。`all` を選ぶと従来どおり、**ログにデバイス コードが出て、誰かが見に行く
