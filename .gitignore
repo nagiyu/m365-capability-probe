@@ -438,9 +438,13 @@ obj/
 .vs/
 
 # Local settings and secrets. Real values belong in user-secrets or the environment,
-# never in a tracked file.
+# never in a tracked file. The key files are here because the certificate leg is pointed at a
+# .pfx on disk, and the obvious place to put one while testing is next to the code.
 appsettings.local.json
 *.pfx
+*.p12
+*.key
+*.pem
 
 # Visual Studio launch profiles. This is where an IDE run puts its command line arguments
 # and its environment variables, so it is exactly where a PROBE_ClientSecret would end up.

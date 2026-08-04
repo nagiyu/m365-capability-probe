@@ -28,6 +28,7 @@ public static class Program
             ProbeOptionsLoader.WriteProblems(Console.Out, configuration.Problems);
             if (!configuration.IsUsable(command))
             {
+                Console.Out.WriteLine($"'{command}' cannot run without the above. Nothing was probed.");
                 return 78;
             }
 
@@ -107,13 +108,20 @@ public static class Program
         writer.WriteLine("Usage:");
         writer.WriteLine("  auth        request a token for Graph, SharePoint and Azure RMS, as the app and as a person");
         writer.WriteLine("  access      read every file's permission list as the app and as a person, in one run");
-        writer.WriteLine("  sharepoint  spend the SharePoint token against SharePoint REST, both ways: what Entra");
+        writer.WriteLine("  sharepoint  spend the SharePoint token against SharePoint REST, every way: what Entra");
         writer.WriteLine("              issued, next to what the resource does about it");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
         writer.WriteLine();
         writer.WriteLine("  TenantId ClientId ClientSecret SiteUrl FilePaths DelegatedUserHint");
+        writer.WriteLine("  ClientCertificatePath ClientCertificatePassword   (optional)");
+        writer.WriteLine();
+        writer.WriteLine("Point ClientCertificatePath at a .pfx holding a certificate and its private key, and");
+        writer.WriteLine("'auth' and 'sharepoint' add a third identity: the same app registration, with the same");
+        writer.WriteLine("grants, proving itself with a key instead of the secret. Both are asked in one run, so");
+        writer.WriteLine("nothing but the proof of identity differs between them. Left empty, that leg is reported");
+        writer.WriteLine("as not run, with the reason, rather than left out.");
         writer.WriteLine();
         writer.WriteLine("FilePaths takes one or more paths separated by '|'. Each is relative to the root of the");
         writer.WriteLine("site's default document library and does not include the library's own name: a file");

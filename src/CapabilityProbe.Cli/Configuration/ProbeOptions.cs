@@ -1,8 +1,9 @@
 namespace CapabilityProbe.Configuration;
 
 /// <summary>
-/// The six settings the probe needs. Nothing here is optional-by-convenience:
-/// every value is either supplied by the operator or the run is refused up front.
+/// The settings the probe needs. The six required ones are not optional-by-convenience: each is
+/// either supplied by the operator or the run is refused up front. The certificate is the exception -
+/// it adds an identity when present, and its absence is reported rather than assumed.
 /// </summary>
 public sealed class ProbeOptions
 {
@@ -14,6 +15,27 @@ public sealed class ProbeOptions
 
     /// <summary>Client secret of the app registration. Keep this in user-secrets.</summary>
     public string ClientSecret { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Path to a PKCS#12 (<c>.pfx</c>) file holding a certificate and its private key, for the
+    /// app-only leg that authenticates with a certificate instead of the secret.
+    /// <para>
+    /// Optional. Left empty, that leg is reported as not run rather than quietly skipped - an absent
+    /// measurement and a measurement of nothing are different things.
+    /// </para>
+    /// <para>
+    /// A file path rather than an inline blob because the same value has to work from a developer's
+    /// machine and from CI, and a path works in both: CI writes its secret to a temporary file first.
+    /// One input, one code path.
+    /// </para>
+    /// </summary>
+    public string ClientCertificatePath { get; set; } = string.Empty;
+
+    /// <summary>Password protecting the <c>.pfx</c>, if it has one. Keep it in user-secrets.</summary>
+    public string ClientCertificatePassword { get; set; } = string.Empty;
+
+    /// <summary>True when a certificate was configured, whether or not it turns out to be loadable.</summary>
+    public bool HasCertificate => !string.IsNullOrWhiteSpace(ClientCertificatePath);
 
     /// <summary>Site collection URL in the form <c>https://&lt;host&gt;/sites/&lt;name&gt;</c>.</summary>
     public string SiteUrl { get; set; } = string.Empty;

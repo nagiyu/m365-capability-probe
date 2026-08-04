@@ -12,6 +12,11 @@ Entra のアプリ登録 (テナント ID / クライアント ID / クライア
 2. **届かなかったとき、正確に何が返ってきたか。** 拒否は測定値として記録します。ID プロバイダーや
    Graph が実際に返したエラーコードつきで。ここでの `403` は結果であって、不具合の報告ではありません。
 
+証明書 (`.pfx`) を設定すると、`auth` と `sharepoint` は **3 本目の identity** を足します ―
+**同じアプリ登録、同じ付与のまま、Entra に対する名乗り方だけをシークレットから鍵に替えたもの**です。
+2 つは同じ実行の中で並べて要求されるので、答えが違ったならば、違いうるものが他にありません。
+設定しなければ、そのレグは黙って消えるのではなく **理由つきで `NotRun`** として報告されます。
+
 すべて `HttpClient` を直接使っています。Graph SDK は使いません ― **どの URL にどのヘッダを付けて
 叩いたかが読めて、手で再現できること** がこのツールの価値であり、SDK はそれを隠すからです。Graph と
 SharePoint REST を同じ経路で扱えるのも、この選択の結果です (SharePoint REST は Graph SDK の対象外です)。
@@ -54,9 +59,40 @@ SharePoint REST を同じ経路で扱えるのも、この選択の結果です 
 デバイス コード フローを使います。これはパブリック クライアント フローなので、**クライアント
 シークレットは一切使いません** ― シークレットを使うのは app-only 側だけです。
 
+### 証明書 (任意)
+
+証明書レグを使うなら、鍵ペアを作って **公開鍵だけ** をアプリ登録に登録します。秘密鍵は手元に
+残り、Entra には渡りません ― アプリが送るのはそれで作った署名です。
+
+```bash
+# 自己署名の鍵ペアを作る (有効期間 1 年)
+openssl req -x509 -newkey rsa:2048 -days 365 -nodes \
+  -keyout probe.key -out probe.crt -subj "/CN=capability-probe"
+
+# 秘密鍵を含む .pfx。ツールが読むのはこちら
+openssl pkcs12 -export -inkey probe.key -in probe.crt -out probe.pfx -passout pass:
+```
+
+Windows なら PowerShell でも作れます。
+
+```powershell
+$cert = New-SelfSignedCertificate -Subject "CN=capability-probe" `
+  -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(1)
+Export-Certificate       -Cert $cert -FilePath probe.crt
+Export-PfxCertificate    -Cert $cert -FilePath probe.pfx -Password (Read-Host -AsSecureString)
+```
+
+アプリ登録の **証明書とシークレット > 証明書 > 証明書のアップロード** で `probe.crt` (公開鍵の側) を
+アップロードします。`.pfx` は **絶対にアップロードしないでください** ― 秘密鍵が入っています。
+アップロード後に表示される拇印は、`auth` / `sharepoint` のヘッダ行に出る `cert` の拇印と一致するはず
+です。**一致していなければ、手元の鍵は Entra が知っている鍵ではありません。**
+
+証明書はアクセス許可を何も変えません。**変わるのはアプリが自分を証明する方法だけ**で、それがこの
+レグの測定対象です。
+
 ## 設定
 
-キーは 6 つです。
+必須のキーが 6 つ、証明書レグ用の任意のキーが 2 つです。
 
 | キー | 内容 |
 | --- | --- |
@@ -66,6 +102,16 @@ SharePoint REST を同じ経路で扱えるのも、この選択の結果です 
 | `SiteUrl` | `https://<host>/sites/<name>` |
 | `FilePaths` | 読むファイルのパス。`\|` 区切りで複数指定できる。例 `/test.docx\|/drafts/q3.docx` |
 | `DelegatedUserHint` | 委任側で使う利用者のサインイン名 |
+| `ClientCertificatePath` | (任意) 秘密鍵を含む `.pfx` のパス |
+| `ClientCertificatePassword` | (任意) その `.pfx` のパスワード。無ければ空のまま |
+
+`ClientCertificatePath` が **パス** であって埋め込みの値でないのは、同じ値が手元のマシンでも CI でも
+そのまま働く必要があるからです。CI は自分のシークレットを一時ファイルに書いてからパスを渡します。
+入力が 1 つなら、コードの経路も 1 つで済みます。
+
+証明書まわりの失敗は **例外ではなく測定値** です。ファイルが無い、パスワードが違う、秘密鍵が入って
+いない ― いずれも「要求を出せなかった理由」として `NotRun` の行に載ります。**「Entra が断った」と
+「そもそも何も訊いていない」は、テナントについて逆のことを意味します。**
 
 **`FilePaths` の各パスにライブラリ名自体は含めません。** この値は `/drive/root:` に付け足されますが、
 そこはすでにサイトの既定のドキュメント ライブラリのルートです。したがってライブラリ直下にある
@@ -80,7 +126,7 @@ SharePoint REST を同じ経路で扱えるのも、この選択の結果です 
 
 **何個並べても、デバイス コードのサインインは 1 回だけ**です。
 
-他の 5 つのキーはそのまま読まれます。分解されるのは `SiteUrl` だけで、ホスト名 (SharePoint の
+他のキーはそのまま読まれます。分解されるのは `SiteUrl` だけで、ホスト名 (SharePoint の
 スコープになります) とサーバー相対パス (サイトを解決します) に分けられます。
 
 設定は 5 つの層から読まれ、**後の層が勝ちます**。
@@ -102,6 +148,10 @@ dotnet user-secrets set "ClientSecret"      "<シークレットの値>"
 dotnet user-secrets set "SiteUrl"           "https://contoso.sharepoint.com/sites/probe"
 dotnet user-secrets set "FilePaths"         "/test.docx|/drafts/q3.docx"
 dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
+
+# 証明書レグを使うなら
+dotnet user-secrets set "ClientCertificatePath"     "C:\path\to\probe.pfx"
+dotnet user-secrets set "ClientCertificatePassword" "<.pfx のパスワード。無ければ設定しない>"
 ```
 
 このツールは何かをする前に設定を検証します。足りないキーは名前で、それが塞いでいるサブコマンドと
@@ -109,15 +159,20 @@ dotnet user-secrets set "DelegatedUserHint" "reader@contoso.com"
 
 ```
 Missing or invalid keys:
-  ClientSecret       missing - client secret; keep it in user-secrets, not in a committed file
-                     blocks: auth, access
-  FilePaths          missing - one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx
-                     blocks: access
+  ClientSecret               missing - client secret; keep it in user-secrets, not in a committed file
+                             blocks: auth, access, sharepoint
+  FilePaths                  missing - one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx
+                             blocks: access
 
 Subcommand readiness:
-  auth     ready
-  access   needs FilePaths
+  auth        ready
+  access      needs FilePaths
+  sharepoint  ready
 ```
+
+**何も塞がないのに報告される項目もあります。** 例えば `ClientCertificatePassword` だけがあって
+`ClientCertificatePath` が空のとき ― 実行は続きますが、黙って無視すると「渡した値を読まないツール」に
+見えるので、`blocks: nothing` として出します。
 
 ## 実行
 
@@ -133,13 +188,15 @@ dotnet run --project src/CapabilityProbe.Cli -- sharepoint
 dotnet run --project src/CapabilityProbe.Cli -- access --FilePaths="/a.docx|/drafts/b.docx"
 ```
 
-どちらのサブコマンドも、表を出力すると同時に、同じ内容を
+どのサブコマンドも、表を出力すると同時に、同じ内容を
 `reports/<サブコマンド>-<タイムスタンプ>.json` に書きます。
 
 ### `auth`
 
-3 つの audience に対して 2 つのモードでトークンを要求し、6 通りの結果を報告します。トークンは何の
-呼び出しにも使いません。このサブコマンドが測るのは **アプリが何を保持しているか** だけです。
+3 つの audience に対して 3 つのモード ― app-only (シークレット)、app-only (証明書)、委任 ― で
+トークンを要求し、9 通りの結果を報告します。トークンは何の呼び出しにも使いません。このサブコマンドが
+測るのは **アプリが何を保持しているか** だけです。証明書を設定していなければ、その 3 列は
+`not requested: NoCertificateConfigured` になります ― 拒否ではなく、要求を出していないという意味です。
 
 | audience | スコープ |
 | --- | --- |
@@ -151,9 +208,10 @@ SharePoint のスコープは `SiteUrl` のホスト名から組み立てます�
 持ちません。
 
 上記の設定のテナントで実際に出た形が、これです。**期待値ではなく観測です** ― このツールは
-「こうなるはず」を持ちません。
+「こうなるはず」を持ちません。**これらはシークレットで名乗った app-only と委任の観測で、証明書レグを
+足す前のものです** ― 証明書レグはまだこのテナントに対して実行していません。
 
-| audience | app-only | delegated |
+| audience | app-only (secret) | delegated |
 | --- | --- | --- |
 | Graph | `Sites.Read.All` を保持 | `Sites.Read.All` を保持 |
 | SharePoint | `Sites.Read.All` を保持 | `Sites.Read.All` を保持 ― **下記参照** |
@@ -201,6 +259,12 @@ API アクセス許可の画面にそう書いてある箇所はありません�
 でサインインすると、この比較は黙って無意味になるので、使うべきアカウントを画面に出しています。
 サインインは Graph に対して 1 回だけ行い、以降の audience はサイレントで要求します。そのため同意の
 ない audience は、2 回目のプロンプトで実行を止めることなく、拒否として返ります。
+
+**シークレットと証明書は audience ごとに 1 行で対比されます。** テナントも、クライアント ID も、
+付与されたロールも、要求した瞬間も同じで、**違うのは Entra に対する名乗り方だけ** です。したがって
+この 2 つのセルに差が出たなら、差の出どころは他にありません。ヘッダ行には、シークレットの長さと、
+証明書の拇印・サブジェクト・有効期限が出ます ― **拇印はアプリ登録に載っている値と突き合わせられる
+唯一の値** で、手元の鍵が Entra の知っている鍵かどうかはそれで分かります。
 
 ### `access`
 
@@ -251,6 +315,11 @@ app-only 側が 4 件見えているのと、同じアイテムの、同じ瞬�
 委任のトークンの所要時間には、人がデバイス コードのサインインを終えるまでの待ち時間が含まれます。
 1 分半をサービスの応答時間として提示しないよう、レポートはその旨を明記します。
 
+**このサブコマンドは証明書レグを走らせません。** 省略ではなく判断です ― ここで訊いているのは
+「ある identity に何が見えるか」であって、**アプリが Entra に何を差し出して名乗ったかはトークンの
+話であってファイルの話ではありません**。その問いには `auth` と `sharepoint` が答えます。全ファイルに
+3 本目を通せば呼び出しは倍近くになりますが、増える答えはありません。
+
 ## GitHub Actions から実行する
 
 デバッガを毎回立ち上げなくても、`Actions` タブの **capability probe** から実行できます。設定の第 4 層
@@ -264,6 +333,21 @@ app-only 側が 4 件見えているのと、同じアイテムの、同じ瞬�
 | `PROBE_TENANTID` | `TenantId` |
 | `PROBE_CLIENTID` | `ClientId` |
 | `PROBE_CLIENTSECRET` | `ClientSecret` |
+| `PROBE_CLIENTCERTIFICATE` | (任意) `.pfx` を **base64 にしたもの** |
+| `PROBE_CLIENTCERTIFICATEPASSWORD` | (任意) その `.pfx` のパスワード |
+
+証明書だけは扱いが違います。シークレットは文字列で、ツールが要るのはファイルなので、ワークフローは
+base64 を **ランナーの一時ディレクトリに書き出してから、そのパスを他の設定と同じ経路で渡します**。
+ツール側の入力は 1 つのまま、コードの経路も 1 つのままです。
+
+```bash
+# 登録する値の作り方
+base64 -w0 probe.pfx        # Linux / macOS (macOS は -w0 不要)
+certutil -encode probe.pfx probe.b64   # Windows。ヘッダ行を取り除いて 1 行にする
+```
+
+**シークレットを設定しなければ、証明書レグは「要求を出していない」として報告されます。** ジョブは
+失敗しません ― 証明書が無いこと自体が測定結果だからです。
 
 残りの 3 つは、その実行が何を測るのかそのものなので、dispatch の入力です。`SiteUrl` と
 `DelegatedUserHint` は必須、`FilePaths` は `access` のときだけ必要です (`auth` では空のまま実行できます)。
@@ -299,7 +383,8 @@ app-only のトークンを先に取ってから止まり、コードと URL を
 事実ではありません。この 2 つは別の問いで、後者はずっと測られていませんでした。**アプリは、リソースが
 受け付けないクレームを持つことがあり、トークンを見てもそれは分かりません。**
 
-このサブコマンドは SharePoint 宛のトークンを実際に使います。app-only と委任の両方で、5 本。
+このサブコマンドは SharePoint 宛のトークンを実際に使います。**3 つの identity すべて** ―
+app-only (シークレット)、app-only (証明書)、委任 ― で、それぞれ 5 本。
 
 ```
 Graph GET /v1.0/sites/{host}:{path}          -> 対照。アプリは生きているか
@@ -320,16 +405,17 @@ SP    GET {SiteUrl}/_api/web/sitegroups({id})/users  -> その中身を列挙で
 
 **`sitegroups({id})/users` はチェーンした呼び出し**で、直前の一覧から取った ID を使います。ここに 1 つ
 判断が要ります: **一覧を拒否された identity は ID を持てません。** そのまま `NotRun` にすると、
-「app-only はメンバーを列挙できるか」という肝心の問いが測れないまま消えるので、**もう片方の
-identity が見つけた ID を借ります**。レポートは **その ID がどちらの答えから来たか** を記録します。
+「app-only はメンバーを列挙できるか」という肝心の問いが測れないまま消えるので、**一覧に成功した
+identity が見つけた ID を借ります**。レポートは **その ID がどの答えから来たか** を記録します。
 
 `Accept` は `application/json;odata=nometadata` です。SharePoint REST は指定しないと冗長な OData の
 封筒で返してくるためで、Graph 側の呼び出しとは違う値を送っています。**送ったヘッダは呼び出しごとに
 記録される**ので、レポートを見れば実際に何を送ったか分かります。
 
 2 本目があるのは、**「トークンが効いたか」と「誰として効いたか」が別の答え** だからです。
-`currentuser` は SharePoint が認識している呼び出し元を返すので、2 つのレグがトークン エンドポイントの
-上だけでなく **リソースの上でも本当に別の identity なのか** がここで分かります。
+`currentuser` は SharePoint が認識している呼び出し元を返すので、3 つのレグがトークン エンドポイントの
+上だけでなく **リソースの上でも本当に別の identity なのか** がここで分かります。**シークレットと
+証明書の 2 本がここで同じものを返すか違うものを返すかは、他では見えません。**
 
 レポートは **Entra が発行したもの** と **各 API が honour したもの** を並べます。
 
@@ -337,11 +423,16 @@ identity が見つけた ID を借ります**。レポートは **その ID が�
 | --- | --- |
 | What Entra issued | audience ごとの `roles` / `scp` / `aud` ― トークンが何を持っているか |
 | What each API honoured | 各呼び出しのステータスと、返ってきた中身の一部 |
-| 対比の行 | `roles: Sites.Read.All -> 200 OK` のように、持っているものと起きたことを 1 行に |
+| 対比の行 | `secret 401 Unauthorized; cert 401 Unauthorized; delegated 200 OK` |
+
+対比の行に **付与内容を書かないのは意図的** です。3 本並ぶともう幅が足りず、端末で末尾が落ちます ―
+そして落ちるのはたいてい肝心なところです。**同じクレームを持つ 2 つの identity が違う答えを受け取った、
+という事実こそが所見** なので、行にはステータスだけを載せ、付与内容は JSON の `details` に回しました。
 
 **ヘッダに `app roles` が出ます。** これは測定した時点で何が付与されていたかの記録です。アクセス許可を
 差し替えて何度か回すとき、**レポート自体が「どの構成で測ったか」を持つ**ので、順番を覚えていなくても
-束を比べられます。
+束を比べられます。2 本の app-only レグは同じアプリ登録なので普通は同じ内容になり、その場合は 1 行に
+まとまります。**食い違ったときだけ両方が書かれます** ― そのときは、それがその実行で一番面白い事実です。
 
 グループのメンバーは**数と `PrincipalType` だけ**を記録し、名前は出しません。列挙できるかどうかが
 測定対象であって、誰であるかは誰かのディレクトリです ― このレポートは、そのディレクトリが無い場所で
@@ -404,9 +495,14 @@ src/CapabilityProbe.Cli/
 
 ## 秘密の扱い
 
-秘密は 1 つも追跡されていません。`appsettings.local.json`、`reports/`、`*.pfx`、
+秘密は 1 つも追跡されていません。`appsettings.local.json`、`reports/`、`*.pfx` / `*.p12`、
 `Properties/launchSettings.json` は git 管理外です。トークンはメモリ上にのみ保持されます。記録される
 要求ヘッダには、ベアラー トークンの値ではなくその長さが載ります。
+
+証明書についてレポートに出るのは **拇印・サブジェクト・有効期限** だけです。いずれも公開鍵の側の値で、
+アプリ登録の画面にも同じものが出ています。秘密鍵はファイルから読まれてメモリ上の署名に使われるだけで、
+どこにも書き出されません。Windows では既定で秘密鍵が利用者のキー ストアに残るため、**残さない読み方
+(`EphemeralKeySet`) を先に試します** ― プローブが、指した先のマシンに鍵を置いていくべきではありません。
 
 ## ライセンス
 

@@ -32,6 +32,17 @@ public sealed record TokenResult(
     /// </summary>
     public bool CarriesPermission => Succeeded && (Claims is null || Claims.CarriesPermission);
 
+    /// <summary>
+    /// False when no request ever left the machine, and <see cref="ErrorCode"/> says what stopped it.
+    /// <para>
+    /// "Entra said no" and "nothing was ever asked" are both failures with a reason attached, and they
+    /// mean opposite things about the tenant: the first is a measurement of it, the second is a
+    /// measurement of the setup this probe was handed. A report that prints them the same way invites
+    /// the reader to draw the first conclusion from the second.
+    /// </para>
+    /// </summary>
+    public bool Requested { get; init; } = true;
+
     public static TokenResult Success(
         ProbeMode mode,
         ProbeAudience audience,
@@ -50,6 +61,19 @@ public sealed record TokenResult(
     public static TokenResult Failure(
         ProbeMode mode, ProbeAudience audience, string scope, string errorCode, string errorDetail, long elapsedMs) =>
         new(mode, audience, scope, false, errorCode, errorDetail, null, elapsedMs);
+
+    /// <summary>Nothing was asked for, and <paramref name="reasonCode"/> is why. Not a refusal.</summary>
+    public static TokenResult NotRequested(
+        ProbeMode mode, ProbeAudience audience, string scope, string reasonCode, string reasonDetail) =>
+        new(mode, audience, scope, false, reasonCode, reasonDetail, null, 0) { Requested = false };
+
+    /// <summary>How the token request ended, in three words or fewer, for a table cell.</summary>
+    public string StateText => this switch
+    {
+        { Succeeded: true } => "issued",
+        { Requested: false } => $"not requested: {ErrorCode}",
+        _ => $"refused: {ErrorCode}",
+    };
 }
 
 /// <summary>
