@@ -5,6 +5,7 @@ using CapabilityProbe.Configuration;
 using CapabilityProbe.Http;
 using CapabilityProbe.Reporting;
 using Microsoft.InformationProtection;
+using Microsoft.InformationProtection.Exceptions;
 using Microsoft.InformationProtection.File;
 using Microsoft.InformationProtection.Protection;
 
@@ -71,7 +72,36 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
         public long? Bytes { get; init; }
 
+        /// <summary>
+        /// Who Graph says created the item, when the file came from a site. This is a fact about the
+        /// library, not about the protection - the two can name different people, and whether they do
+        /// is the point of recording it.
+        /// </summary>
+        public string? CreatedBy { get; init; }
+
         public IReadOnlyList<(string Step, HttpObservation Observation)> Calls { get; init; } = [];
+    }
+
+    /// <summary>
+    /// What can be read out of the file itself, before anyone asks the protection service for
+    /// anything.
+    /// <para>
+    /// <c>FileHandler.GetSerializedPublishingLicense</c> is static and takes only a context: no
+    /// engine, no auth delegate, no token, no use licence. If the owner is readable here, then
+    /// "try, be refused, read the owner off the refusal, try again" is one round-trip longer than
+    /// it needs to be - which is the thing worth knowing before building a fallback on it.
+    /// </para>
+    /// </summary>
+    private sealed record FileFacts
+    {
+        public bool? IsProtected { get; init; }
+        public bool? IsLabeled { get; init; }
+        public string? Owner { get; init; }
+        public string? ContentId { get; init; }
+        public string? IssuerId { get; init; }
+        public string? Domains { get; init; }
+        public string? IssuedTime { get; init; }
+        public string? Error { get; init; }
     }
 
     private sealed record LegResult
@@ -109,6 +139,18 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
         /// <summary>Set when reading the descriptor itself threw, which is its own measurement.</summary>
         public string? DescriptorError { get; init; }
+
+        /// <summary>
+        /// What the refusal itself named, when the refusal was a <c>NoPermissionsException</c>.
+        /// <para>
+        /// The SDK puts an owner and a referrer on that exception. Whether they are always filled in
+        /// decides whether a refusal is a usable source of the owner, or only sometimes one - and
+        /// "sometimes" is the answer that quietly breaks code built on it.
+        /// </para>
+        /// </summary>
+        public string? RefusalOwner { get; init; }
+
+        public string? RefusalReferrer { get; init; }
         public long ElapsedMs { get; init; }
         public long? DecryptedBytes { get; init; }
     }
@@ -176,6 +218,14 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 }
             }
 
+            // Before any token is spent: what does the file say about itself?
+            var facts = new Dictionary<string, FileFacts>();
+            foreach (var source in sources.Where(s => s.Path is not null))
+            {
+                console.WriteLine($"Reading {source.Name} without asking the service for anything...");
+                facts[source.Name] = ReadFileFacts(source.Path!);
+            }
+
             var consent = new MipConsentDelegate(console);
             var results = new List<LegResult>();
 
@@ -195,6 +245,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             report.Add(BuildTable(results));
             report.Add(BuildRightsTable(results));
             report.Add(BuildDescriptorTable(results));
+            report.Add(BuildOwnerTable(sources, facts, results));
 
             foreach (var result in results)
             {
@@ -313,6 +364,10 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         // The name matters: the SDK decides how to read a file from its extension, so a downloaded
         // copy called anything else would be a different measurement.
         var name = ReadStringProperty(item, "name") ?? file.Split('/').Last();
+
+        // Who the library says put the file there. Not the same question as who the protection names
+        // as its owner, and the whole point of carrying it is that the two can disagree.
+        var createdBy = ReadCreatedBy(item);
         var directory = Path.Combine(Path.GetTempPath(), $"capability-probe-{Guid.NewGuid():n}");
         Directory.CreateDirectory(directory);
         var destination = Path.Combine(directory, name);
@@ -345,6 +400,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             Path = destination,
             IsTemporary = true,
             Bytes = bytes,
+            CreatedBy = createdBy,
             Calls = calls,
         };
     }
@@ -400,6 +456,101 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return new DescriptorFacts(null, null, null, null, null, $"{ex.GetType().Name}: {FirstLine(ex.Message)}");
+        }
+    }
+
+    /// <summary>
+    /// Graph's <c>createdBy</c>, preferring the address over the display name because an address is
+    /// the same shape as everything else being compared here.
+    /// </summary>
+    private static string? ReadCreatedBy(HttpObservation observation)
+    {
+        if (!observation.IsSuccess || string.IsNullOrWhiteSpace(observation.Body))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(observation.Body);
+            if (!document.RootElement.TryGetProperty("createdBy", out var createdBy) ||
+                !createdBy.TryGetProperty("user", out var user))
+            {
+                return null;
+            }
+
+            foreach (var property in new[] { "email", "userPrincipalName", "displayName" })
+            {
+                if (user.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String)
+                {
+                    return value.GetString();
+                }
+            }
+
+            return "(createdBy carried no name)";
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads what the file says about itself, before any token is spent on it.
+    /// <para>
+    /// Everything here is static on the SDK and takes only a context - no engine, no auth delegate,
+    /// no use licence. If the owner is readable at this point then a fallback does not need a
+    /// refusal to learn it, and "try, be refused, read the owner off the refusal, retry" is a round
+    /// trip longer than the situation requires.
+    /// </para>
+    /// <para>
+    /// Wrapped whole: this is the SDK reading a file format, and a file it cannot parse is a
+    /// measurement rather than a reason to lose the legs below it.
+    /// </para>
+    /// </summary>
+    private FileFacts ReadFileFacts(string path)
+    {
+        try
+        {
+            MIP.Initialize(MipComponent.File, AppContext.BaseDirectory);
+
+            using var mipContext = MIP.CreateMipContext(
+                new MipConfiguration(
+                    new ApplicationInfo
+                    {
+                        ApplicationId = options.ClientId,
+                        ApplicationName = ApplicationName,
+                        ApplicationVersion = "1.0.0",
+                    },
+                    Path.Combine(Path.GetTempPath(), "mip_data"),
+                    LogLevel.Error,
+                    isOfflineOnly: false,
+                    cacheStorageType: CacheStorageType.InMemory));
+
+            var status = FileHandler.GetFileStatus(path, mipContext, null);
+
+            if (!status.IsProtected())
+            {
+                return new FileFacts { IsProtected = false, IsLabeled = status.IsLabeled() };
+            }
+
+            var serialized = FileHandler.GetSerializedPublishingLicense(path, mipContext, null);
+            var licence = PublishingLicenseInfo.GetPublishingLicenseInfo(serialized, mipContext);
+
+            return new FileFacts
+            {
+                IsProtected = true,
+                IsLabeled = status.IsLabeled(),
+                Owner = licence.Owner,
+                ContentId = licence.ContentId,
+                IssuerId = licence.IssuerId,
+                Domains = licence.Domains is { Count: > 0 } domains ? string.Join(" ", domains) : null,
+                IssuedTime = licence.IssuedTime.ToString("u"),
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new FileFacts { Error = $"{ex.GetType().Name}: {FirstLine(ex.Message)}" };
         }
     }
 
@@ -577,7 +728,9 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             started.Stop();
 
             // A refusal is the answer half the time here, so it is caught and recorded like any other
-            // result. The SDK's own exception type is the closest thing to an error code it offers.
+            // result. The SDK's own exception type is the closest thing to an error code it offers -
+            // and one of those types carries more than a message, so it is unwrapped rather than
+            // flattened to its first line with everything else.
             return new LegResult
             {
                 File = source.Name,
@@ -586,6 +739,8 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 Opened = false,
                 FailureType = ex.GetType().Name,
                 Failure = FirstLine(ex.Message),
+                RefusalOwner = (ex as NoPermissionsException)?.Owner,
+                RefusalReferrer = (ex as NoPermissionsException)?.Referrer,
                 ElapsedMs = started.ElapsedMilliseconds,
             };
         }
@@ -679,6 +834,58 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 })
                 .ToList());
 
+    /// <summary>
+    /// The same question - who owns this file - asked of four different places, side by side.
+    /// <para>
+    /// A fallback that retries as the owner has to get the owner from somewhere, and the four columns
+    /// are the candidate somewheres. They differ in what they cost: the first two are free of the
+    /// protection service entirely, the third needs a licence (so it cannot help a caller who was
+    /// refused), and the fourth needs a refusal to have happened first.
+    /// </para>
+    /// <para>
+    /// Empty cells are not blanks. Graph's column is empty for a file that did not come from a site;
+    /// the refusal column is empty for a leg that opened. Both say "this source did not apply here",
+    /// which is different from "this source had nothing".
+    /// </para>
+    /// </summary>
+    private static ProbeTable BuildOwnerTable(
+        IReadOnlyList<FileSource> sources,
+        IReadOnlyDictionary<string, FileFacts> facts,
+        IReadOnlyList<LegResult> results)
+    {
+        var rows = new List<IReadOnlyList<string?>>();
+
+        foreach (var source in sources.Where(s => s.Path is not null))
+        {
+            var fact = facts.TryGetValue(source.Name, out var f) ? f : new FileFacts();
+            var forFile = results.Where(r => r.File == source.Name).ToList();
+
+            var licence = forFile.Where(r => r.Opened).Select(r => r.Owner).FirstOrDefault(o => o is not null);
+            var refusals = forFile.Where(r => !r.Opened && r.FailureType == nameof(NoPermissionsException)).ToList();
+
+            // Null and empty are different answers here too: a refusal that carried no owner and a
+            // file that produced no refusal at all must not read the same.
+            var refusalOwners = refusals.Count == 0
+                ? "(no refusal)"
+                : string.Join(", ", refusals.Select(r => r.RefusalOwner ?? "(not carried)").Distinct());
+
+            rows.Add(new[]
+            {
+                Leaf(source.Name),
+                source.CreatedBy ?? "-",
+                fact.Owner ?? (fact.Error is null ? "-" : "unreadable"),
+                licence ?? "-",
+                refusalOwners,
+                fact.IsProtected switch { true => "yes", false => "no", null => "-" },
+            });
+        }
+
+        return new ProbeTable(
+            "Where the owner can be read from (left to right: no service call, no token, needs a licence, needs a refusal)",
+            ["file", "Graph createdBy", "publishing licence", "issued licence", "refusal said", "protected"],
+            rows);
+    }
+
     private static Observation LegObservation(LegResult result)
     {
         var subject = $"{Leaf(result.File)} / DelegatedUserEmail = {result.DelegatedUserEmail}";
@@ -711,6 +918,8 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 ["descriptorName"] = result.DescriptorName,
                 ["descriptorRights"] = result.DescriptorRights,
                 ["descriptorError"] = result.DescriptorError,
+                ["refusalOwner"] = result.RefusalOwner,
+                ["refusalReferrer"] = result.RefusalReferrer,
                 ["decryptedBytes"] = result.DecryptedBytes?.ToString(),
                 ["failureType"] = result.FailureType,
                 ["failure"] = result.Failure,
