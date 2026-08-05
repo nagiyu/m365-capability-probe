@@ -168,8 +168,8 @@ Export-PfxCertificate    -Cert $cert -FilePath probe.pfx -Password (Read-Host -A
 
 | キー | 内容 |
 | --- | --- |
-| `ProtectedSiteFile` | 開く保護済みファイルの、**ライブラリ内のパス**。例 `/probe.docx`。`SiteUrl` が要る |
-| `ProtectedFilePath` | 開く保護済みファイルの、**このマシン上のパス**。上と**同時には設定できない** |
+| `ProtectedSiteFiles` | 開く保護済みファイルの、**ライブラリ内のパス**。`\|` 区切りで複数。例 `/a.docx\|/b.docx`。`SiteUrl` が要る |
+| `ProtectedFilePaths` | 開く保護済みファイルの、**このマシン上のパス**。`\|` 区切りで複数。上と**同時には設定できない** |
 | `DelegatedUserEmails` | `DelegatedUserEmail` に入れるアドレス。`\|` 区切りで複数。**未設定のレグは常に 1 本足される** |
 | `MipIdentityEmail` | (任意) `Identity` をここに固定する。空なら `Identity` は `DelegatedUserEmail` と一緒に動く |
 
@@ -684,7 +684,7 @@ JSON にはアイテム 1 件あたりの呼び出し回数も入ります。**�
 
 ```bash
 dotnet run --project src/CapabilityProbe.Cli -- consume \
-  --ProtectedSiteFile=/probe.docx \
+  --ProtectedSiteFiles="/a.docx|/b.docx" \
   --DelegatedUserEmails="a@example.com|b@example.com" \
   --MipIdentityEmail=a@example.com
 ```
@@ -699,8 +699,14 @@ dotnet run --project src/CapabilityProbe.Cli -- consume \
 - **復号したストリームは長さしか読みません。** 中身はどこにも書き出しません
 - ファイルは実行の終わりに消します（取得した場合）
 
-`ProtectedSiteFile` を使うと、取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) も
-**測定として並びます**。取れなければレグは `NotRun` になり、理由が残ります。
+**ファイルは何枚でも並べられます。** 全部が**同じ実行・同じレグ・同じ瞬間**に開かれるので、
+**2 枚の差はファイルについての事実**になります。別々の実行で比べると「その間に何も動いていない」を
+仮定することになり、このツールは**誰も触っていないテナントが変わるところを既に見ています**
+(所見 7)。1 枚しか測らないと所見 6 と同じ穴が開く、というのも同じ話です。
+
+`ProtectedSiteFiles` を使うと、ファイルごとに取得の 3 呼び出し (サイト解決 / アイテム解決 /
+`/content`) も**測定として並びます**。取れなければそのファイルは `NotRun` になり、理由が残ります ―
+**他のファイルは走ります。**
 
 実テナントで出た形が、これです。**`Identity` を固定した回と、固定先を変えた回を並べています。**
 

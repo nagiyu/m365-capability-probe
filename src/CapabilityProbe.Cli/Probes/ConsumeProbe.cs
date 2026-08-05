@@ -55,6 +55,9 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
     /// </summary>
     private sealed record FileSource
     {
+        /// <summary>The path as it was configured. Short enough to be a table column.</summary>
+        public required string Name { get; init; }
+
         public required string Description { get; init; }
 
         /// <summary>The file on disk, or null when there is nothing to open.</summary>
@@ -72,6 +75,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
     private sealed record LegResult
     {
+        public required string File { get; init; }
         public required string DelegatedUserEmail { get; init; }
         public required string IdentityEmail { get; init; }
         public string? Failure { get; init; }
@@ -114,37 +118,56 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             return report;
         }
 
-        var source = await GetFileAsync(credential, cancellationToken);
-        report.Subject["file"] = source.Description;
+        var files = options.ProtectedSiteFileList.Count > 0
+            ? options.ProtectedSiteFileList
+            : options.ProtectedFilePathList;
+        report.Subject["files"] = string.Join(", ", files);
+
+        var sources = new List<FileSource>();
 
         try
         {
-            foreach (var (step, observation) in source.Calls)
+            foreach (var file in files)
             {
-                report.Add(FetchObservation(step, observation));
+                sources.Add(await GetFileAsync(file, credential, cancellationToken));
             }
 
-            if (source.Path is null)
+            foreach (var source in sources)
             {
-                // The console grid clips a long cell, and this row's entire value is the reason.
-                // Written out here in full so the log carries it even where the table cannot.
-                console.WriteLine($"The file was not fetched: {source.Problem}");
-                report.Add(Observation.NotRun("the protected file", source.Problem!));
-                report.Finish();
-                return report;
-            }
+                foreach (var (step, observation) in source.Calls)
+                {
+                    report.Add(FetchObservation(source, step, observation));
+                }
 
-            report.Add(Observation.Measured(
-                "the protected file",
-                $"{source.Bytes?.ToString() ?? "?"} bytes at hand, from {source.Description}"));
+                if (source.Path is null)
+                {
+                    // The console grid clips a long cell, and this row's entire value is the reason.
+                    // Written out here in full so the log carries it even where the table cannot.
+                    console.WriteLine($"{source.Name} was not fetched: {source.Problem}");
+                    report.Add(Observation.NotRun($"{source.Name}: the protected file", source.Problem!));
+                }
+                else
+                {
+                    report.Add(Observation.Measured(
+                        $"{source.Name}: the protected file",
+                        $"{source.Bytes?.ToString() ?? "?"} bytes at hand, from {source.Description}"));
+                }
+            }
 
             var consent = new MipConsentDelegate(console);
             var results = new List<LegResult>();
 
-            foreach (var leg in legs)
+            // Every file, by every leg, in one run. Two files opened in separate runs can only be
+            // compared by assuming nothing moved in between - and this tool has already watched a
+            // tenant change under it with nobody touching it (finding 7). Held together here, a
+            // difference between two files is a fact about the files.
+            foreach (var source in sources.Where(s => s.Path is not null))
             {
-                console.WriteLine($"Opening the file as {leg}...");
-                results.Add(await OpenAsync(source.Path, leg, credential, consent, cancellationToken));
+                foreach (var leg in legs)
+                {
+                    console.WriteLine($"Opening {source.Name} as {leg}...");
+                    results.Add(await OpenAsync(source, leg, credential, consent, cancellationToken));
+                }
             }
 
             report.Add(BuildTable(results));
@@ -155,7 +178,13 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 report.Add(LegObservation(result));
             }
 
-            report.Add(ContrastObservation(results));
+            foreach (var source in sources.Where(s => s.Path is not null))
+            {
+                report.Add(ContrastObservation(
+                    source.Name,
+                    results.Where(r => r.File == source.Name).ToList()));
+            }
+
             report.Finish();
             return report;
         }
@@ -163,9 +192,9 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         {
             // What was fetched is somebody's file. It exists for the length of a run and no longer,
             // and a run that ends badly is exactly when that matters most.
-            if (source is { IsTemporary: true, Path: not null })
+            foreach (var source in sources.Where(s => s is { IsTemporary: true, Path: not null }))
             {
-                Delete(source.Path);
+                Delete(source.Path!);
             }
         }
     }
@@ -175,24 +204,27 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
     /// returned alongside the result, because a file that never arrived is a measurement about this
     /// app's reach - the same measurement <c>access</c> makes, taken here for a different reason.
     /// </summary>
-    private async Task<FileSource> GetFileAsync(TokenCredential credential, CancellationToken cancellationToken)
+    private async Task<FileSource> GetFileAsync(
+        string file,
+        TokenCredential credential,
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(options.ProtectedSiteFile))
+        if (options.ProtectedSiteFileList.Count == 0)
         {
-            var path = options.ProtectedFilePath;
-            var exists = File.Exists(path);
+            var exists = File.Exists(file);
 
             return new FileSource
             {
-                Description = $"{path} (this machine)",
-                Path = exists ? path : null,
-                Bytes = exists ? new FileInfo(path).Length : null,
-                Problem = exists ? null : $"no file at '{path}', so nothing could be opened as anyone",
+                Name = file,
+                Description = $"{file} (this machine)",
+                Path = exists ? file : null,
+                Bytes = exists ? new FileInfo(file).Length : null,
+                Problem = exists ? null : $"no file at '{file}', so nothing could be opened as anyone",
             };
         }
 
-        var description = $"{options.ProtectedSiteFile} in {options.SiteUrl}";
-        console.WriteLine($"Fetching {options.ProtectedSiteFile} from the site as the application...");
+        var description = $"{file} in {options.SiteUrl}";
+        console.WriteLine($"Fetching {file} from the site as the application...");
 
         var calls = new List<(string Step, HttpObservation Observation)>();
 
@@ -211,6 +243,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             var (code, detail) = AuthErrorCode.Describe(ex);
             return new FileSource
             {
+                Name = file,
                 Description = description,
                 Problem = $"{code}: {detail} - no Graph token, so the file was never fetched",
             };
@@ -230,6 +263,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         {
             return new FileSource
             {
+                Name = file,
                 Description = description,
                 Calls = calls,
                 Problem = $"the site did not resolve ({site.StatusText} {ApiError.Code(site)}".TrimEnd() +
@@ -237,7 +271,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             };
         }
 
-        var itemUrl = $"{GraphBase}/sites/{siteId}/drive/root:{EscapePath(options.ProtectedSiteFile)}";
+        var itemUrl = $"{GraphBase}/sites/{siteId}/drive/root:{EscapePath(file)}";
         var item = await http.GetAsync(itemUrl, accessToken, cancellationToken);
         calls.Add(("resolve item", item));
 
@@ -245,6 +279,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         {
             return new FileSource
             {
+                Name = file,
                 Description = description,
                 Calls = calls,
                 Problem = $"the file did not resolve ({item.StatusText} {ApiError.Code(item)}".TrimEnd() +
@@ -254,7 +289,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
         // The name matters: the SDK decides how to read a file from its extension, so a downloaded
         // copy called anything else would be a different measurement.
-        var name = ReadStringProperty(item, "name") ?? options.ProtectedSiteFile.Split('/').Last();
+        var name = ReadStringProperty(item, "name") ?? file.Split('/').Last();
         var directory = Path.Combine(Path.GetTempPath(), $"capability-probe-{Guid.NewGuid():n}");
         Directory.CreateDirectory(directory);
         var destination = Path.Combine(directory, name);
@@ -271,6 +306,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             Delete(destination);
             return new FileSource
             {
+                Name = file,
                 Description = description,
                 Calls = calls,
                 IsTemporary = true,
@@ -281,6 +317,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
         return new FileSource
         {
+            Name = file,
             Description = description,
             Path = destination,
             IsTemporary = true,
@@ -338,9 +375,9 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         }
     }
 
-    private static Observation FetchObservation(string step, HttpObservation observation) =>
+    private static Observation FetchObservation(FileSource source, string step, HttpObservation observation) =>
         Observation.Measured(
-            $"fetching the file: {step}",
+            $"{source.Name}: fetching the file - {step}",
             observation.DownloadedBytes is { } bytes
                 ? $"{observation.StatusText}, {bytes} bytes"
                 : $"{observation.StatusText} {ApiError.Code(observation)}".TrimEnd()) with
@@ -356,7 +393,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         };
 
     private async Task<LegResult> OpenAsync(
-        string filePath,
+        FileSource source,
         string leg,
         TokenCredential credential,
         MipConsentDelegate consent,
@@ -416,8 +453,8 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             var engine = await profile.AddEngineAsync(engineSettings);
 
             var handler = await engine.CreateFileHandlerAsync(
-                filePath,
-                filePath,
+                source.Path!,
+                source.Path!,
                 isAuditDiscoveryEnabled: false,
                 fileExecutionState: new ProbeFileExecutionState(),
                 isGetSensitivityLabelAuditDiscoveryEnabled: false);
@@ -438,6 +475,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
             return new LegResult
             {
+                File = source.Name,
                 DelegatedUserEmail = leg,
                 IdentityEmail = identityEmail.Length == 0 ? "(empty)" : identityEmail,
                 Opened = true,
@@ -459,6 +497,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
             // result. The SDK's own exception type is the closest thing to an error code it offers.
             return new LegResult
             {
+                File = source.Name,
                 DelegatedUserEmail = leg,
                 IdentityEmail = identityEmail.Length == 0 ? "(empty)" : identityEmail,
                 Opened = false,
@@ -504,11 +543,12 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
     }
 
     private static ProbeTable BuildTable(IReadOnlyList<LegResult> results) =>
-        new("What the protection service issued for each DelegatedUserEmail",
-            ["DelegatedUserEmail", "Identity", "opened", "protected", "issued to", "owner", "to owner", "ms"],
+        new("What the protection service issued for each file and each DelegatedUserEmail",
+            ["file", "DelegatedUserEmail", "Identity", "opened", "protected", "issued to", "owner", "to owner", "ms"],
             results
                 .Select(r => (IReadOnlyList<string?>)new[]
                 {
+                    Leaf(r.File),
                     r.DelegatedUserEmail,
                     r.IdentityEmail,
                     r.Opened ? "yes" : $"no: {r.FailureType}",
@@ -522,10 +562,11 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
     private static ProbeTable BuildRightsTable(IReadOnlyList<LegResult> results) =>
         new("What each leg was allowed to do with the content (rights as the service named them)",
-            ["DelegatedUserEmail", "rights", "decrypted bytes", "why not"],
+            ["file", "DelegatedUserEmail", "rights", "decrypted bytes", "why not"],
             results
                 .Select(r => (IReadOnlyList<string?>)new[]
                 {
+                    Leaf(r.File),
                     r.DelegatedUserEmail,
                     r.Rights.Count == 0 ? "-" : string.Join(", ", r.Rights),
                     r.DecryptedBytes?.ToString() ?? "-",
@@ -535,7 +576,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
     private static Observation LegObservation(LegResult result)
     {
-        var subject = $"DelegatedUserEmail = {result.DelegatedUserEmail}";
+        var subject = $"{Leaf(result.File)} / DelegatedUserEmail = {result.DelegatedUserEmail}";
 
         var observed = result switch
         {
@@ -550,6 +591,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         {
             Details = new Dictionary<string, string?>
             {
+                ["file"] = result.File,
                 ["delegatedUserEmail"] = result.DelegatedUserEmail,
                 ["identity"] = result.IdentityEmail,
                 ["opened"] = result.Opened ? "true" : "false",
@@ -568,22 +610,39 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
     }
 
     /// <summary>
-    /// The legs on one line. It states no expectation about which of them should have worked - what
-    /// the addresses were supposed to mean is an argument about a particular tenant, and it belongs
-    /// somewhere it can be dated.
+    /// One file's legs on one line. It states no expectation about which of them should have worked -
+    /// what the addresses were supposed to mean is an argument about a particular tenant, and it
+    /// belongs somewhere it can be dated.
+    /// <para>
+    /// The owner is named here rather than left to the table. Whether the licence went to someone who
+    /// is not the file's owner is the difference between "this account has rights" and "this account
+    /// made the file", and those two are only told apart by a file whose owner is somebody else.
+    /// </para>
     /// </summary>
-    private static Observation ContrastObservation(IReadOnlyList<LegResult> results)
+    private static Observation ContrastObservation(string file, IReadOnlyList<LegResult> results)
     {
         var observed = string.Join("; ", results.Select(r =>
             $"{Short(r.DelegatedUserEmail)} {(r.Opened ? r.IssuedTo is null ? "opened" : $"issued to {Short(r.IssuedTo)}" : "refused")}"));
 
-        return Observation.Measured("DelegatedUserEmail: does the value change the answer", observed) with
+        var owner = results.Select(r => r.Owner).FirstOrDefault(o => o is not null);
+        if (owner is not null)
+        {
+            observed += $" (owner {Short(owner)})";
+        }
+
+        return Observation.Measured(
+            $"{Leaf(file)}: does DelegatedUserEmail change the answer", observed) with
         {
             Details = results.ToDictionary(
                 r => r.DelegatedUserEmail,
-                r => (string?)(r.Opened ? $"issuedTo={r.IssuedTo}; rights={string.Join(" ", r.Rights)}" : $"refused: {r.FailureType}")),
+                r => (string?)(r.Opened
+                    ? $"issuedTo={r.IssuedTo}; owner={r.Owner}; toOwner={r.IssuedToOwner}; rights={string.Join(" ", r.Rights)}"
+                    : $"refused: {r.FailureType}")),
         };
     }
+
+    /// <summary>The last path segment, so a column stays a column. The full path is in the JSON.</summary>
+    private static string Leaf(string path) => path.Split('/').Last();
 
     private static string Short(string email)
     {

@@ -51,8 +51,8 @@ on:
         type: string
         required: false
         default: ""
-      protected_site_file:
-        description: "consume only. Path to the protected file in the site's document library, e.g. /probe-miku-only.docx. Needs site_url."
+      protected_site_files:
+        description: "consume only. Paths to the protected files in the site's document library, separated by '|', e.g. /a.docx|/b.docx. Needs site_url. Several are opened in one run, by the same legs, so a difference between them is about the files."
         type: string
         required: false
         default: ""
@@ -147,7 +147,7 @@ jobs:
             if [ "$SUBCOMMAND" = "consume" ]; then
               echo
               echo "The file is not a secret: it is fetched from the site's document library with the"
-              echo "app's own token, at the path given as protected_site_file, and deleted when the run"
+              echo "app's own token, at the paths given as protected_site_files, and deleted when the run"
               echo "ends. Which file is being opened is what this run is about, so it is an input."
             fi
           elif [ "$IDENTITIES" = "all" ]; then
@@ -180,7 +180,7 @@ jobs:
           PROBE_IDENTITIES: ${{ inputs.identities }}
           PROBE_DELEGATEDUSEREMAILS: ${{ inputs.delegated_user_emails }}
           PROBE_MIPIDENTITYEMAIL: ${{ inputs.mip_identity_email }}
-          PROBE_PROTECTEDSITEFILE: ${{ inputs.protected_site_file }}
+          PROBE_PROTECTEDSITEFILES: ${{ inputs.protected_site_files }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
         run: |
