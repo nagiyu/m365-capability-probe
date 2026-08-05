@@ -56,6 +56,16 @@ on:
         type: string
         required: false
         default: ""
+      page_size:
+        description: "acl only, optional. $top for every collection. Set it small (e.g. 2) to make a library too small to page on its own page anyway. Empty takes whatever the service calls a page."
+        type: string
+        required: false
+        default: ""
+      page_limit:
+        description: "acl only, optional. How many pages a route may follow before stopping. Reaching it is reported as reaching it, never as the end of the collection. Empty means 20."
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -181,6 +191,8 @@ jobs:
           PROBE_DELEGATEDUSEREMAILS: ${{ inputs.delegated_user_emails }}
           PROBE_MIPIDENTITYEMAIL: ${{ inputs.mip_identity_email }}
           PROBE_PROTECTEDSITEFILES: ${{ inputs.protected_site_files }}
+          PROBE_PAGESIZE: ${{ inputs.page_size }}
+          PROBE_PAGELIMIT: ${{ inputs.page_limit }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
         run: |

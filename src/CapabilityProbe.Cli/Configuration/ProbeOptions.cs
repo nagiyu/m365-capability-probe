@@ -145,6 +145,44 @@ public sealed class ProbeOptions
     /// </summary>
     public string MipIdentityEmail { get; set; } = string.Empty;
 
+    /// <summary>
+    /// How many items to ask each collection for at a time, as <c>$top</c>. Empty leaves it off and
+    /// takes whatever the service considers a page.
+    /// <para>
+    /// It exists so that paging can be measured without first putting hundreds of files somewhere.
+    /// Set it to 2 against a library of seven and every route has to follow a continuation link to
+    /// answer at all - which is the part of paging that lives in this tool rather than in the service.
+    /// </para>
+    /// <para>
+    /// What it cannot measure is the other half: whether a service caps a page below what was asked
+    /// for, or stops offering links past some depth. That needs real volume, and the report says which
+    /// of the two a given run was.
+    /// </para>
+    /// </summary>
+    public string PageSize { get; set; } = string.Empty;
+
+    /// <summary>The requested page size, or null when it was not set or was not a positive number.</summary>
+    public int? RequestedPageSize =>
+        int.TryParse(PageSize.Trim(), out var value) && value > 0 ? value : null;
+
+    /// <summary>
+    /// How many pages a route may follow before it stops. Empty means <see cref="DefaultPageLimit"/>.
+    /// <para>
+    /// A limit is not a silent truncation as long as it is reported, and reaching it is reported: the
+    /// route says it stopped at the limit with more waiting, not that the collection ended. A route
+    /// that walked 20 pages and one that walked 20 of 400 are the same number of calls and completely
+    /// different measurements.
+    /// </para>
+    /// </summary>
+    public string PageLimit { get; set; } = string.Empty;
+
+    /// <summary>Pages a route follows when <see cref="PageLimit"/> says nothing.</summary>
+    public const int DefaultPageLimit = 20;
+
+    /// <summary>The page limit in force for this run.</summary>
+    public int PagesToFollow =>
+        int.TryParse(PageLimit.Trim(), out var value) && value > 0 ? value : DefaultPageLimit;
+
     /// <summary>Host name taken from <see cref="SiteUrl"/>. Used to build the SharePoint scope.</summary>
     public string SiteHost =>
         Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;

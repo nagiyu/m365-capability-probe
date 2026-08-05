@@ -27,8 +27,19 @@ namespace CapabilityProbe.Probes;
 /// Cost is not the only axis, and on its own it is the misleading one. A call that returns in a
 /// quarter of the time because it quietly returned a quarter of the answer is a worse route, not a
 /// better one, so every route also reports how many items came back, how many carried an ACL at all,
-/// whether more pages were waiting, and - for the two Graph routes, which return the same objects the
-/// baseline does - whether each item's ACL matches what reading it alone produced.
+/// how many pages it took and how the walk ended, and - for the two Graph routes, which return the
+/// same objects the baseline does - whether each item's ACL matches what reading it alone produced.
+/// </para>
+/// <para>
+/// Every route follows its collection's continuation links. It did not, at first, and that made the
+/// cost of every route a cost per page rather than a cost per library - a number that says nothing
+/// about whether the route scales, which is the only reason to prefer it. Where a walk stops is
+/// reported: ran out, hit the page limit with more waiting, or was refused partway.
+/// </para>
+/// <para>
+/// <c>PageSize</c> forces a small page so that this can be exercised against a library too small to
+/// page on its own. What that cannot show is whether a service caps or truncates at volume; that
+/// needs real volume, and a report says which of the two a run was.
 /// </para>
 /// <para>
 /// The SharePoint route is reported beside the others and never compared for equality with them. A
@@ -69,7 +80,16 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         public int? WithAcl { get; init; }
 
         public int? Entries { get; init; }
-        public bool? MorePages { get; init; }
+
+        /// <summary>How many pages were fetched. One is not the same claim as "there was one page".</summary>
+        public int? Pages { get; init; }
+
+        /// <summary>
+        /// How the walk over this route's collection finished, in words. A route that ran out of
+        /// items, one that stopped at the page limit with more waiting, and one whose third page was
+        /// refused all end with items in hand, and the count alone cannot tell them apart.
+        /// </summary>
+        public string? Ending { get; init; }
 
         /// <summary>Item ID to the shape of its ACL, for checking one route against another.</summary>
         public IReadOnlyDictionary<string, string> PerItem { get; init; } =
@@ -107,6 +127,87 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         public RouteResult? Find(string route) => Routes.FirstOrDefault(r => r.Route == route);
     }
 
+    /// <summary>
+    /// What walking one paged collection produced. <see cref="Items"/> is null only when the very
+    /// first page never came back - a walk that got three pages and was refused the fourth has items,
+    /// and reporting it as nothing would throw away the part that worked.
+    /// </summary>
+    private sealed record Walk(
+        IReadOnlyList<AclResponses.Item>? Items,
+        int Pages,
+        long ElapsedMs,
+        string Ending,
+        string? Refusal);
+
+    /// <summary>
+    /// Follows a collection to its end, or to the page limit, whichever comes first.
+    /// <para>
+    /// Every page is a call and is counted as one, because that is what the cost table is measuring.
+    /// A bulk route that answers in one call for seven files and in nine calls for nine hundred is a
+    /// different proposition from one that answers in one call either way, and until this followed
+    /// links the tool could not tell those apart - it read page one and reported the cost of page one.
+    /// </para>
+    /// <para>
+    /// Stopping at the limit is reported as stopping at the limit. The alternative - returning what
+    /// was gathered and letting the item count speak - is exactly the silent truncation this tool
+    /// keeps finding in other people's answers.
+    /// </para>
+    /// </summary>
+    private async Task<Walk> WalkAsync(
+        Leg leg, string url, string token, bool sharePoint, CancellationToken cancellationToken)
+    {
+        var limit = options.PagesToFollow;
+        var items = new List<AclResponses.Item>();
+        var pages = 0;
+        long elapsed = 0;
+        string? next = url;
+
+        while (next is not null)
+        {
+            var observation = sharePoint
+                ? await http.GetAsync(next, token, cancellationToken, SharePointAccept)
+                : await http.GetAsync(next, token, cancellationToken);
+
+            leg.Calls.Add(observation);
+            pages++;
+            elapsed += observation.ElapsedMs;
+
+            var page = sharePoint
+                ? AclResponses.SharePointPage(observation)
+                : AclResponses.GraphPage(observation);
+
+            if (page is null)
+            {
+                return pages == 1
+                    ? new Walk(null, pages, elapsed, "the first page never came back", Describe(observation))
+                    : new Walk(items, pages, elapsed,
+                        $"page {pages} did not come back ({Describe(observation)})", null);
+            }
+
+            items.AddRange(page.Items);
+            next = page.NextLink;
+
+            if (next is not null && pages >= limit)
+            {
+                return new Walk(items, pages, elapsed,
+                    $"stopped at the {limit}-page limit - more was waiting", null);
+            }
+        }
+
+        return new Walk(items, pages, elapsed,
+            pages == 1 ? "one page, no continuation offered" : $"{pages} pages, then the collection ended",
+            null);
+    }
+
+    /// <summary>
+    /// Appends <c>$top</c> when the run asked for a page size, so that paging can be exercised against
+    /// a library that is too small to page on its own.
+    /// </summary>
+    private string WithPageSize(string url) =>
+        options.RequestedPageSize is { } size
+            ? url + (url.Contains('?') ? '&' : '?') + $"$top={size}"
+            : url;
+
     public async Task<ProbeReport> RunAsync(CancellationToken cancellationToken)
     {
         var report = new ProbeReport("acl");
@@ -114,6 +215,18 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         report.Subject["client"] = options.ClientId;
         report.Subject["site"] = options.SiteUrl;
         report.Subject["hint"] = options.DelegatedUserHint;
+
+        // Both of these decide how much of the library the numbers below are about, and neither one
+        // shows up anywhere else in the report. A run whose page size silently failed to arrive reads
+        // exactly like a library that did not need paging - which is what happened the first time.
+        report.Subject["page size"] = options.RequestedPageSize is { } size
+            ? $"$top={size}"
+            : options.PageSize.Trim().Length > 0
+                ? $"'{options.PageSize}' is not a page size, so none was asked for"
+                : "not set - whatever each service calls a page";
+        report.Subject["page limit"] =
+            $"{options.PagesToFollow} pages per route" +
+            (options.PageLimit.Trim().Length > 0 ? "" : " (the default)");
 
         console.WriteLine("Establishing the application identity (client credentials, shared secret)...");
         var secret = AppOnlyTokenSource.WithSecret(options);
@@ -233,31 +346,37 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         }
 
         var token = leg.GraphToken.AccessToken;
-        var children = await http.GetAsync($"{GraphBase}/sites/{leg.SiteId}/drive/root/children", token, cancellationToken);
-        leg.Calls.Add(children);
 
-        var page = AclResponses.GraphPage(children);
-        if (page is null)
+        // The listing is walked to its end before any ACL is read. The baseline is what the bulk
+        // routes are compared against, so it has to cover the same items they do - a baseline that
+        // stopped at page one would make every bulk route look like it returned items the baseline
+        // had never heard of.
+        var walk = await WalkAsync(
+            leg, WithPageSize($"{GraphBase}/sites/{leg.SiteId}/drive/root/children"), token, false, cancellationToken);
+
+        if (walk.Items is null)
         {
             return new RouteResult
             {
                 Route = Baseline,
                 Mode = leg.Mode,
                 Enumerates = RootChildren,
-                Calls = 1,
-                ElapsedMs = children.ElapsedMs,
-                Refusal = Describe(children),
+                Calls = walk.Pages,
+                Pages = walk.Pages,
+                Ending = walk.Ending,
+                ElapsedMs = walk.ElapsedMs,
+                Refusal = walk.Refusal,
             };
         }
 
-        var calls = 1;
-        var elapsed = children.ElapsedMs;
+        var calls = walk.Pages;
+        var elapsed = walk.ElapsedMs;
         var perItem = new Dictionary<string, string>(StringComparer.Ordinal);
         var breakdown = new List<string>();
         var entries = 0;
         var withAcl = 0;
 
-        foreach (var item in page.Items)
+        foreach (var item in walk.Items)
         {
             var permissions = await http.GetAsync(
                 $"{GraphBase}/sites/{leg.SiteId}/drive/items/{item.Id}/permissions", token, cancellationToken);
@@ -285,11 +404,12 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             Mode = leg.Mode,
             Enumerates = RootChildren,
             Calls = calls,
+            Pages = walk.Pages,
+            Ending = walk.Ending,
             ElapsedMs = elapsed,
-            Items = page.Items.Count,
+            Items = walk.Items.Count,
             WithAcl = withAcl,
             Entries = entries,
-            MorePages = page.MorePages,
             PerItem = perItem,
             Breakdown = breakdown,
         };
@@ -303,21 +423,25 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             return Blocked(route, enumerates, leg);
         }
 
-        var observation = await http.GetAsync(
-            $"{GraphBase}/sites/{leg.SiteId}{path}", leg.GraphToken.AccessToken, cancellationToken);
-        leg.Calls.Add(observation);
+        var walk = await WalkAsync(
+            leg,
+            WithPageSize($"{GraphBase}/sites/{leg.SiteId}{path}"),
+            leg.GraphToken.AccessToken,
+            false,
+            cancellationToken);
 
-        var page = AclResponses.GraphPage(observation);
-        if (page is null)
+        if (walk.Items is null)
         {
             return new RouteResult
             {
                 Route = route,
                 Mode = leg.Mode,
                 Enumerates = enumerates,
-                Calls = 1,
-                ElapsedMs = observation.ElapsedMs,
-                Refusal = Describe(observation),
+                Calls = walk.Pages,
+                Pages = walk.Pages,
+                Ending = walk.Ending,
+                ElapsedMs = walk.ElapsedMs,
+                Refusal = walk.Refusal,
             };
         }
 
@@ -326,16 +450,20 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             Route = route,
             Mode = leg.Mode,
             Enumerates = enumerates,
-            Calls = 1,
-            ElapsedMs = observation.ElapsedMs,
-            Items = page.Items.Count,
-            WithAcl = page.Expanded,
-            Entries = page.TotalEntries,
-            MorePages = page.MorePages,
-            PerItem = page.Items
+            Calls = walk.Pages,
+            Pages = walk.Pages,
+            Ending = walk.Ending,
+            ElapsedMs = walk.ElapsedMs,
+            Items = walk.Items.Count,
+            WithAcl = Expanded(walk.Items),
+            Entries = TotalEntries(walk.Items),
+            PerItem = walk.Items
                 .Where(i => i.Permissions is not null)
-                .ToDictionary(i => i.Id, i => i.Permissions!.Fingerprint, StringComparer.Ordinal),
-            Breakdown = Describe(page),
+                // A drive item can appear on more than one delta page. The last word wins, which is
+                // the same thing delta itself means by sending it twice.
+                .GroupBy(i => i.Id, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.Last().Permissions!.Fingerprint, StringComparer.Ordinal),
+            Breakdown = Describe(walk.Items),
         };
     }
 
@@ -383,23 +511,25 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             };
         }
 
+        // A page size is only forced when the run asked for one. Left alone this keeps the 100 it has
+        // always asked for, so a run that changes nothing measures what the previous runs measured.
         var url = $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
-                  "/items?$expand=RoleAssignments&$top=100";
+                  $"/items?$expand=RoleAssignments&$top={options.RequestedPageSize ?? 100}";
 
-        var items = await http.GetAsync(url, leg.SharePointToken.AccessToken, cancellationToken, SharePointAccept);
-        leg.Calls.Add(items);
+        var walk = await WalkAsync(leg, url, leg.SharePointToken.AccessToken, true, cancellationToken);
 
-        var page = AclResponses.SharePointPage(items);
-        if (page is null)
+        if (walk.Items is null)
         {
             return new RouteResult
             {
                 Route = SharePointExpand,
                 Mode = leg.Mode,
                 Enumerates = WholeList,
-                Calls = 2,
-                ElapsedMs = drive.ElapsedMs + items.ElapsedMs,
-                Refusal = Describe(items),
+                Calls = walk.Pages + 1,
+                Pages = walk.Pages,
+                Ending = walk.Ending,
+                ElapsedMs = drive.ElapsedMs + walk.ElapsedMs,
+                Refusal = walk.Refusal,
             };
         }
 
@@ -408,13 +538,14 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
             Route = SharePointExpand,
             Mode = leg.Mode,
             Enumerates = WholeList,
-            Calls = 2,
-            ElapsedMs = drive.ElapsedMs + items.ElapsedMs,
-            Items = page.Items.Count,
-            WithAcl = page.Expanded,
-            Entries = page.TotalEntries,
-            MorePages = page.MorePages,
-            Breakdown = Describe(page),
+            Calls = walk.Pages + 1,
+            Pages = walk.Pages,
+            Ending = walk.Ending,
+            ElapsedMs = drive.ElapsedMs + walk.ElapsedMs,
+            Items = walk.Items.Count,
+            WithAcl = Expanded(walk.Items),
+            Entries = TotalEntries(walk.Items),
+            Breakdown = Describe(walk.Items),
         };
     }
 
@@ -423,10 +554,14 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
     /// route that returned five items and a route that returned four being inspectable rather than
     /// argued about.
     /// </summary>
-    private static IReadOnlyList<string> Describe(AclResponses.Page page) =>
-        page.Items
+    private static IReadOnlyList<string> Describe(IReadOnlyList<AclResponses.Item> items) =>
+        items
             .Select(i => $"{i.Name ?? i.Id}: {i.Permissions?.Fingerprint ?? "(no acl)"}")
             .ToList();
+
+    private static int Expanded(IReadOnlyList<AclResponses.Item> items) => AclResponses.Expanded(items);
+
+    private static int? TotalEntries(IReadOnlyList<AclResponses.Item> items) => AclResponses.TotalEntries(items);
 
     private static RouteResult Blocked(string route, string enumerates, Leg leg) =>
         new()
@@ -494,11 +629,12 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                     route.Enumerates,
                     leg.Mode.Display(),
                     route.Ran ? route.Calls.ToString() : "-",
+                    route.Pages?.ToString() ?? "-",
                     route.Ran ? route.ElapsedMs.ToString() : "-",
                     route.Items?.ToString() ?? "-",
                     route.WithAcl?.ToString() ?? "-",
                     route.Entries?.ToString() ?? "-",
-                    route.MorePages switch { true => "yes", false => "no", null => "-" },
+                    route.Ending ?? "-",
                     route.Blocked ?? route.Refusal ?? "",
                 });
             }
@@ -506,7 +642,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
 
         return new ProbeTable(
             "What each route cost (site resolution is excluded - every route needs it)",
-            ["route", "walks", "mode", "calls", "ms", "items", "with acl", "acl entries", "more pages", "why not"],
+            ["route", "walks", "mode", "calls", "pages", "ms", "items", "with acl", "acl entries", "how the walk ended", "why not"],
             rows);
     }
 
@@ -618,7 +754,7 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
               $"({route.Calls} calls, {route.ElapsedMs} ms)"
             : $"{route.Items} items, {route.WithAcl} of them carrying an ACL, {route.Entries} entries " +
               $"in {route.Calls} calls / {route.ElapsedMs} ms" +
-              (route.MorePages == true ? " - more pages were waiting" : "");
+              (route.Ending is null ? "" : $" - {route.Ending}");
 
         return Observation.Measured(subject, observed) with
         {
@@ -631,7 +767,8 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                 ["items"] = route.Items?.ToString(),
                 ["itemsWithAcl"] = route.WithAcl?.ToString(),
                 ["aclEntries"] = route.Entries?.ToString(),
-                ["morePages"] = route.MorePages?.ToString(),
+                ["pages"] = route.Pages?.ToString(),
+                ["ending"] = route.Ending,
                 ["enumerates"] = route.Enumerates,
                 ["breakdown"] = route.Breakdown.Count == 0 ? null : string.Join(" | ", route.Breakdown),
                 ["refusal"] = route.Refusal,
@@ -682,8 +819,9 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
                 ["note"] = usable.Count == 0
                     ? "every bulk route either refused or returned items without an ACL, so reading each " +
                       "item on its own is the only route measured to work for this identity"
-                    : "the bulk routes answered in a fixed number of calls regardless of how many items " +
-                      "the page held; see the agreement table for whether they answered the same thing",
+                    : "the bulk routes answered in one call per page rather than one per item; the page " +
+                      "counts say how much of that was a fixed cost and how much grew with the library, " +
+                      "and the agreement table says whether they answered the same thing",
             }.Concat(usable.SelectMany(r => new Dictionary<string, string?>
             {
                 [$"{Short(r.Route)}Calls"] = r.Calls.ToString(),

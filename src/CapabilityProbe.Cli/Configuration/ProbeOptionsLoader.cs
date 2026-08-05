@@ -43,6 +43,8 @@ public static class ProbeOptionsLoader
 
     private static readonly string[] AccessOnly = [AccessCommand];
 
+    private static readonly string[] AclOnly = [AclCommand];
+
     /// <summary>
     /// Keys that took one value and now take several. A stale singular value binds to nothing and
     /// would otherwise leave a run reporting that no file was configured while one plainly was.
@@ -218,6 +220,20 @@ public static class ProbeOptionsLoader
                 "FilePaths",
                 $"every path must start with '/': '{file}' (expected e.g. /test.docx)",
                 AccessOnly));
+        }
+
+        // Both of these decide how much of a library a run looked at. A value that failed to parse
+        // would fall back to a default and produce a report about a different question than the one
+        // asked, so a typo stops the run rather than quietly changing what it measured.
+        foreach (var (key, value) in new[] { ("PageSize", options.PageSize), ("PageLimit", options.PageLimit) })
+        {
+            if (!string.IsNullOrWhiteSpace(value) && !(int.TryParse(value.Trim(), out var n) && n > 0))
+            {
+                problems.Add(new ConfigurationProblem(
+                    key,
+                    $"'{value}' is not a positive whole number (empty leaves it at the default)",
+                    AclOnly));
+            }
         }
 
         return new ProbeOptionsResult(options, problems);
