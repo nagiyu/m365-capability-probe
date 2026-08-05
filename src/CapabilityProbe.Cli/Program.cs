@@ -135,7 +135,7 @@ public static class Program
         writer.WriteLine("              call per item? three candidate routes against the one-at-a-time baseline");
         writer.WriteLine("  mip         can this build reach the Information Protection SDK at all? needs no");
         writer.WriteLine("              configuration and no tenant - it asks about this machine, not about M365");
-        writer.WriteLine("  consume     open one protected file once per DelegatedUserEmail, plus once with the");
+        writer.WriteLine("  consume     open each protected file once per DelegatedUserEmail, plus once with the");
         writer.WriteLine("              value unset, and report what licence the protection service issued");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
@@ -158,12 +158,16 @@ public static class Program
         writer.WriteLine("nothing but the proof of identity differs between them. Left empty, that leg is reported");
         writer.WriteLine("as not run, with the reason, rather than left out.");
         writer.WriteLine();
-        writer.WriteLine("'consume' takes its file from one of two places, never both: ProtectedFilePath, a path on");
-        writer.WriteLine("this machine, or ProtectedSiteFile, a path inside the site's document library which the");
+        writer.WriteLine("'consume' takes its files from one of two places, never both: ProtectedFilePaths, paths on");
+        writer.WriteLine("this machine, or ProtectedSiteFiles, paths inside the site's document library which the");
         writer.WriteLine("app fetches with its own token and deletes when the run ends. The second needs SiteUrl,");
         writer.WriteLine("and exists so a run with nobody at the keyboard still has a file to open - and so that");
         writer.WriteLine("which file is being opened stays a run's input rather than something stored beside a");
-        writer.WriteLine("credential. The fetch is measured like any other call.");
+        writer.WriteLine("credential. Each fetch is measured like any other call.");
+        writer.WriteLine();
+        writer.WriteLine("Both take several paths separated by '|', and every file is opened by every leg in the");
+        writer.WriteLine("same run. Two files measured in separate runs can only be compared by assuming nothing");
+        writer.WriteLine("moved in between; held together, a difference between them is a fact about the files.");
         writer.WriteLine();
         writer.WriteLine("FilePaths takes one or more paths separated by '|'. Each is relative to the root of the");
         writer.WriteLine("site's default document library and does not include the library's own name: a file");

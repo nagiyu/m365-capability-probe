@@ -44,6 +44,16 @@ public static class ProbeOptionsLoader
     private static readonly string[] AccessOnly = [AccessCommand];
 
     /// <summary>
+    /// Keys that took one value and now take several. A stale singular value binds to nothing and
+    /// would otherwise leave a run reporting that no file was configured while one plainly was.
+    /// </summary>
+    private static readonly (string Old, string New)[] RenamedConsumeKeys =
+    [
+        ("ProtectedFilePath", "ProtectedFilePaths"),
+        ("ProtectedSiteFile", "ProtectedSiteFiles"),
+    ];
+
+    /// <summary>
     /// Layers, lowest priority first. The last one that supplies a key wins:
     /// appsettings.json -> appsettings.local.json -> user-secrets -> PROBE_* env vars -> command line.
     /// </summary>
@@ -85,30 +95,30 @@ public static class ProbeOptionsLoader
         // path inside the site's document library. The second exists because a run can happen where
         // there is nobody to hand a file over - and because which file is being opened is what a run
         // is about, which makes it an input rather than something stored alongside the credentials.
-        var hasLocalFile = !string.IsNullOrWhiteSpace(options.ProtectedFilePath);
-        var hasSiteFile = !string.IsNullOrWhiteSpace(options.ProtectedSiteFile);
+        var hasLocalFile = !string.IsNullOrWhiteSpace(options.ProtectedFilePaths);
+        var hasSiteFile = !string.IsNullOrWhiteSpace(options.ProtectedSiteFiles);
 
         if (!hasLocalFile && !hasSiteFile)
         {
             problems.Add(new ConfigurationProblem(
-                "ProtectedFilePath / ProtectedSiteFile",
-                "neither is set - 'consume' needs a protected file, either a path on this machine " +
-                "(inside the container, under /work/samples) or a path inside the site's document library",
+                "ProtectedFilePaths / ProtectedSiteFiles",
+                "neither is set - 'consume' needs at least one protected file, either paths on this machine " +
+                "(inside the container, under /work/samples) or paths inside the site's document library",
                 ConsumeOnly));
         }
         else if (hasLocalFile && hasSiteFile)
         {
             problems.Add(new ConfigurationProblem(
-                "ProtectedFilePath / ProtectedSiteFile",
+                "ProtectedFilePaths / ProtectedSiteFiles",
                 "both are set, and there is no reading of that which does not quietly ignore one of them",
                 ConsumeOnly));
         }
 
-        if (hasSiteFile && !options.ProtectedSiteFile.StartsWith('/'))
+        foreach (var file in options.ProtectedSiteFileList.Where(f => !f.StartsWith('/')))
         {
             problems.Add(new ConfigurationProblem(
-                "ProtectedSiteFile",
-                $"must start with '/': '{options.ProtectedSiteFile}' (expected e.g. /probe.docx). It is " +
+                "ProtectedSiteFiles",
+                $"every path must start with '/': '{file}' (expected e.g. /probe.docx). Each is " +
                 "relative to the root of the site's default document library and does not include the library's name",
                 ConsumeOnly));
         }
@@ -141,7 +151,7 @@ public static class ProbeOptionsLoader
         Require(problems, "FilePaths", options.FilePaths, AccessOnly,
             "one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx");
 
-        // This key used to be singular. Saying so beats leaving a stale value silently ignored while
+        // These keys used to be singular. Saying so beats leaving a stale value silently ignored while
         // the run reports that nothing is configured.
         if (!string.IsNullOrWhiteSpace(configuration?["FilePath"]))
         {
@@ -149,6 +159,17 @@ public static class ProbeOptionsLoader
                 "FilePath",
                 "renamed to FilePaths, which takes several paths separated by '|'. The old value is being ignored",
                 AccessOnly));
+        }
+
+        foreach (var (oldKey, newKey) in RenamedConsumeKeys)
+        {
+            if (!string.IsNullOrWhiteSpace(configuration?[oldKey]))
+            {
+                problems.Add(new ConfigurationProblem(
+                    oldKey,
+                    $"renamed to {newKey}, which takes several paths separated by '|'. The old value is being ignored",
+                    ConsumeOnly));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(options.SiteUrl))
