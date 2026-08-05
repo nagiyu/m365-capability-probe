@@ -6,6 +6,7 @@ using CapabilityProbe.Http;
 using CapabilityProbe.Reporting;
 using Microsoft.InformationProtection;
 using Microsoft.InformationProtection.File;
+using Microsoft.InformationProtection.Protection;
 
 namespace CapabilityProbe.Probes;
 
@@ -87,6 +88,27 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         public bool? IssuedToOwner { get; init; }
         public IReadOnlyList<string> Rights { get; init; } = [];
         public string? LabelId { get; init; }
+
+        /// <summary>
+        /// How the protection was expressed, in the service's own word - <c>TemplateBased</c>,
+        /// <c>Custom</c> or <c>Dynamic</c>. Recorded raw and never translated: a label built by
+        /// picking a template and one built by letting the person choose the rights are different
+        /// shapes on the wire, and the tool has no business deciding which is which.
+        /// </summary>
+        public string? ProtectionType { get; init; }
+
+        public string? TemplateId { get; init; }
+        public string? DescriptorName { get; init; }
+
+        /// <summary>
+        /// Who the protection names and what it grants them, as the descriptor carries it. Null when
+        /// the descriptor has no list at all, empty when it has one with nothing in it - a consumer
+        /// without the right to read the policy is a different state from a policy naming nobody.
+        /// </summary>
+        public string? DescriptorRights { get; init; }
+
+        /// <summary>Set when reading the descriptor itself threw, which is its own measurement.</summary>
+        public string? DescriptorError { get; init; }
         public long ElapsedMs { get; init; }
         public long? DecryptedBytes { get; init; }
     }
@@ -326,6 +348,60 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
         };
     }
 
+    private readonly record struct DescriptorFacts(
+        string? ProtectionType,
+        string? TemplateId,
+        string? LabelId,
+        string? Name,
+        string? Rights,
+        string? Error);
+
+    /// <summary>
+    /// Reads the protection descriptor: how the protection was expressed, rather than what this
+    /// caller was allowed to do with it.
+    /// <para>
+    /// Wrapped because a consumer is not guaranteed to be allowed to read the policy it is being
+    /// held to, and a refusal here should cost one column rather than the whole leg. A descriptor
+    /// that would not be read is recorded as such - it is not the same as one that came back empty.
+    /// </para>
+    /// </summary>
+    private static DescriptorFacts ReadDescriptor(IProtectionHandler? protection)
+    {
+        if (protection is null)
+        {
+            return default;
+        }
+
+        try
+        {
+            var descriptor = protection.ProtectionDescriptor;
+            if (descriptor is null)
+            {
+                return default;
+            }
+
+            // Null and empty are different answers, so they are not collapsed into one string.
+            var userRights = descriptor.UserRights is { } rights
+                ? rights.Count == 0
+                    ? "(none listed)"
+                    : string.Join("; ", rights.Select(r =>
+                        $"{string.Join(",", r.Users ?? [])} -> {string.Join(" ", r.Rights ?? [])}"))
+                : null;
+
+            return new DescriptorFacts(
+                descriptor.ProtectionType.ToString(),
+                descriptor.TemplateId,
+                descriptor.LabelId,
+                descriptor.Name,
+                userRights,
+                null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new DescriptorFacts(null, null, null, null, null, $"{ex.GetType().Name}: {FirstLine(ex.Message)}");
+        }
+    }
+
     /// <summary>Escapes each segment but keeps the separators, so '/my drafts/q3.docx' stays a path.</summary>
     private static string EscapePath(string path) =>
         string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
@@ -460,6 +536,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 isGetSensitivityLabelAuditDiscoveryEnabled: false);
 
             var protection = handler.Protection;
+            var descriptor = ReadDescriptor(protection);
             long? decryptedBytes = null;
 
             if (protection is not null)
@@ -484,7 +561,12 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 IssuedTo = protection?.IssuedTo,
                 IssuedToOwner = protection?.IsIssuedToOwner,
                 Rights = protection?.Rights?.ToList() ?? [],
-                LabelId = protection?.ProtectionDescriptor?.LabelId,
+                LabelId = descriptor.LabelId,
+                ProtectionType = descriptor.ProtectionType,
+                TemplateId = descriptor.TemplateId,
+                DescriptorName = descriptor.Name,
+                DescriptorRights = descriptor.Rights,
+                DescriptorError = descriptor.Error,
                 DecryptedBytes = decryptedBytes,
                 ElapsedMs = started.ElapsedMilliseconds,
             };
@@ -574,6 +656,28 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 })
                 .ToList());
 
+    /// <summary>
+    /// How the protection was expressed, next to what came of it. Separate from the rights table
+    /// because the two answer different questions: that one is about this caller, this one is about
+    /// the file. A label whose rights the person picked and a label built from a template arrive
+    /// here as different values, and nothing else in the report would show it.
+    /// </summary>
+    private static ProbeTable BuildDescriptorTable(IReadOnlyList<LegResult> results) =>
+        new("How the protection was expressed (the descriptor, as opposed to what this caller got)",
+            ["file", "DelegatedUserEmail", "type", "template id", "label id", "named in the policy"],
+            results
+                .Where(r => r.Opened)
+                .Select(r => (IReadOnlyList<string?>)new[]
+                {
+                    Leaf(r.File),
+                    r.DelegatedUserEmail,
+                    r.ProtectionType ?? (r.DescriptorError is null ? "-" : "unreadable"),
+                    r.TemplateId ?? "-",
+                    r.LabelId ?? "-",
+                    r.DescriptorRights ?? r.DescriptorError ?? "not carried",
+                })
+                .ToList());
+
     private static Observation LegObservation(LegResult result)
     {
         var subject = $"{Leaf(result.File)} / DelegatedUserEmail = {result.DelegatedUserEmail}";
@@ -601,6 +705,11 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
                 ["isIssuedToOwner"] = result.IssuedToOwner?.ToString(),
                 ["rights"] = result.Rights.Count == 0 ? null : string.Join(" ", result.Rights),
                 ["labelId"] = result.LabelId,
+                ["protectionType"] = result.ProtectionType,
+                ["templateId"] = result.TemplateId,
+                ["descriptorName"] = result.DescriptorName,
+                ["descriptorRights"] = result.DescriptorRights,
+                ["descriptorError"] = result.DescriptorError,
                 ["decryptedBytes"] = result.DecryptedBytes?.ToString(),
                 ["failureType"] = result.FailureType,
                 ["failure"] = result.Failure,
