@@ -213,3 +213,21 @@ jobs:
           echo "line up is the sign that it happened. Run locally to read a value that comes back ***."
 
           exit $status
+
+      # The log holds the tables; this holds the measurement. A run that is only a log can be read
+      # but not compared - and comparing two runs across a change is how this repository establishes
+      # most of what it knows (findings 5, 6, 7, 8). Kept even when the probe exited non-zero,
+      # because an incomplete run is still the record of what did happen before it stopped.
+      #
+      # The JSON carries no secret: bearer tokens are recorded as a length, and the certificate as
+      # its thumbprint, subject and expiry - all public-key side values. It does carry tenant and
+      # site names, which the log masks and this does not, so it is worth knowing that a download
+      # says more than the page it came from.
+      - name: Keep the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ inputs.subcommand }}-${{ github.run_number }}
+          path: reports/*.json
+          if-no-files-found: warn
+          retention-days: 90
