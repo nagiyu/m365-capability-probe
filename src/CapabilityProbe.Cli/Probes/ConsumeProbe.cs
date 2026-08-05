@@ -194,6 +194,7 @@ public sealed class ConsumeProbe(ProbeOptions options, ProbeHttpClient http, Tex
 
             report.Add(BuildTable(results));
             report.Add(BuildRightsTable(results));
+            report.Add(BuildDescriptorTable(results));
 
             foreach (var result in results)
             {
