@@ -14,19 +14,36 @@ public static class AclResponses
     public sealed record Item(string Id, string? Name, PermissionSummary.Entries? Permissions);
 
     /// <summary>
-    /// A page of items. <see cref="MorePages"/> is the honest half of a page-at-a-time measurement:
+    /// A page of items. <see cref="NextLink"/> is the honest half of a page-at-a-time measurement:
     /// one call answering quickly means nothing if it answered for a fraction of the drive.
+    /// <para>
+    /// The link is kept rather than reduced to a flag. "More were waiting" says a route was measured
+    /// against part of a library; following it says how much of the library there was. Which of those
+    /// two a run does is a decision, and a decision needs the link in hand to be made at all.
+    /// </para>
     /// </summary>
-    public sealed record Page(IReadOnlyList<Item> Items, bool MorePages)
+    public sealed record Page(IReadOnlyList<Item> Items, string? NextLink)
     {
-        public int? TotalEntries =>
-            Items.All(i => i.Permissions is null) && Items.Count > 0
-                ? null
-                : Items.Sum(i => i.Permissions?.Count ?? 0);
-
-        /// <summary>How many of the items actually carried an expanded permission collection.</summary>
-        public int Expanded => Items.Count(i => i.Permissions is not null);
+        /// <summary>Whether the service said there was more after this page.</summary>
+        public bool MorePages => NextLink is not null;
     }
+
+    /// <summary>
+    /// How many ACL entries a set of items carried in total, or null when not one of them carried an
+    /// ACL - a route whose expansion was ignored throughout has no total, and reporting zero would
+    /// say the items are shared with nobody.
+    /// <para>
+    /// Taken over a whole walk rather than over one page, so that a route which pages is counted the
+    /// same way as one that does not.
+    /// </para>
+    /// </summary>
+    public static int? TotalEntries(IReadOnlyList<Item> items) =>
+        items.All(i => i.Permissions is null) && items.Count > 0
+            ? null
+            : items.Sum(i => i.Permissions?.Count ?? 0);
+
+    /// <summary>How many of the items actually carried an expanded permission collection.</summary>
+    public static int Expanded(IReadOnlyList<Item> items) => items.Count(i => i.Permissions is not null);
 
     /// <summary>
     /// A Graph collection - <c>children</c> or <c>delta</c> - with <c>permissions</c> expanded onto
@@ -73,7 +90,7 @@ public static class AclResponses
                 permissions));
         }
 
-        return new Page(items, root.Value.TryGetProperty("@odata.nextLink", out _));
+        return new Page(items, Link(root.Value, "@odata.nextLink"));
     }
 
     /// <summary>The permission collection from a single-item <c>/permissions</c> call.</summary>
@@ -120,9 +137,22 @@ public static class AclResponses
                 assignments is null ? null : new PermissionSummary.Entries(assignments.Value, [])));
         }
 
-        return new Page(items, root.Value.TryGetProperty("odata.nextLink", out _) ||
-                              root.Value.TryGetProperty("@odata.nextLink", out _));
+        // SharePoint writes the link without the '@' under nometadata and with it under the verbose
+        // formats. The probe asks for the first but does not get to decide what arrives.
+        return new Page(items, Link(root.Value, "odata.nextLink") ?? Link(root.Value, "@odata.nextLink"));
     }
+
+    /// <summary>
+    /// A continuation link, or null when the property is absent or is not a usable absolute URL.
+    /// A link that cannot be followed is reported as no link rather than as a walk that failed - the
+    /// service saying "there is more" and the probe being able to go and get it are separate facts.
+    /// </summary>
+    private static string? Link(JsonElement root, string propertyName) =>
+        root.TryGetProperty(propertyName, out var link) &&
+        link.ValueKind == JsonValueKind.String &&
+        Uri.TryCreate(link.GetString(), UriKind.Absolute, out _)
+            ? link.GetString()
+            : null;
 
     /// <summary>
     /// How many role assignments an item carried, or null when the expansion produced nothing to count.
