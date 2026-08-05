@@ -57,6 +57,17 @@ public sealed class AppOnlyTokenSource : ITokenSource
     /// <summary>True when no token can be requested at all, and <see cref="Identity"/> says why.</summary>
     public bool IsUnavailable => _credential is null;
 
+    /// <summary>
+    /// The credential itself, null exactly when <see cref="IsUnavailable"/> is true.
+    /// <para>
+    /// Exposed for the one caller that cannot use <see cref="GetTokenAsync"/>: the Information
+    /// Protection SDK asks for tokens through a callback of its own and has to be handed something it
+    /// can call. Building a second credential there instead is how the certificate's password went
+    /// missing once - the loading of the file happens here, and only here.
+    /// </para>
+    /// </summary>
+    public TokenCredential? Credential => _credential;
+
     public static AppOnlyTokenSource WithSecret(ProbeOptions options) =>
         new(options,
             ProbeMode.AppOnly,

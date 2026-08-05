@@ -1,0 +1,61 @@
+# Builds the probe and checks that it can still reach the Information Protection SDK.
+#
+# The second half is the reason this workflow exists. The SDK is native code loaded through a chain
+# of shared libraries, and every one of them is a way for the build to keep compiling while the tool
+# stops working. 'mip' asks that question and answers it without a tenant, so it can run on every
+# push - unlike every other subcommand here, which needs credentials and a person's judgement.
+name: build
+
+# Pull requests and dispatch only. A wildcard push trigger alongside pull_request fires both on the
+# same commit, which was not a guess - the first run of this workflow produced two of every job, and
+# the expensive one builds a container image.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Warnings are errors in the project file, so this is stricter than it looks.
+      - name: Build
+        run: dotnet build M365CapabilityProbe.sln -c Release
+
+      - name: Usage text runs
+        run: dotnet run --project src/CapabilityProbe.Cli -c Release --no-build -- help
+
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t capability-probe .
+
+      # The probe reports a failed SDK load as a measurement and exits 0, because for a tool whose
+      # subject is other people's tenants a refusal is data. Here the subject is this repository's
+      # own build, so the same output has to be able to fail: the check is made in the workflow
+      # rather than by changing what the exit code means.
+      - name: The SDK still loads
+        run: |
+          set -eu
+          docker run --rm capability-probe mip | tee mip.txt
+
+          if grep -q "initialised - the native libraries loaded and ran" mip.txt; then
+            echo
+            echo "The Information Protection SDK initialised inside the image."
+          else
+            echo
+            echo "The SDK did not initialise. The table above names which system library could not be"
+            echo "loaded; add its package to the Dockerfile, and to the list the mip subcommand checks."
+            exit 1
+          fi

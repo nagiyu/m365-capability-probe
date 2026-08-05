@@ -36,6 +36,12 @@ public sealed record HttpObservation(
     /// </summary>
     public bool BodyTruncated { get; init; }
 
+    /// <summary>
+    /// How many bytes were written to disk, when this was a download rather than a read. Null on
+    /// every other call: a download's body is never kept, so the count is all there is to record.
+    /// </summary>
+    public long? DownloadedBytes { get; init; }
+
     public bool IsSuccess => StatusCode is >= 200 and < 300;
 
     /// <summary>
@@ -203,6 +209,82 @@ public sealed class ProbeHttpClient : IDisposable
             {
                 ResponseHeaders = CollectHeaders(response),
                 BodyTruncated = body.Length > MaxBodyLength,
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            stopwatch.Stop();
+            return new HttpObservation(
+                Method: "GET",
+                Url: url,
+                RequestHeaders: recordedHeaders,
+                StatusCode: null,
+                ReasonPhrase: null,
+                Body: string.Empty,
+                ElapsedMs: stopwatch.ElapsedMilliseconds,
+                TransportError: $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Fetches a URL straight to a file on disk, recorded the same way as <see cref="GetAsync"/>.
+    /// <para>
+    /// The body is not kept when the fetch succeeds: it is the contents of somebody's file, and this
+    /// tool has no business holding them. What is recorded is how many bytes there were. A refusal
+    /// keeps its body, because that one is an explanation and nothing is written to disk.
+    /// </para>
+    /// <para>
+    /// Redirects are followed, which is how the download endpoints answer - and the handler drops the
+    /// Authorization header when the redirect crosses to another host, so the bearer token is not
+    /// handed to whatever storage front end the service names.
+    /// </para>
+    /// </summary>
+    public async Task<HttpObservation> DownloadAsync(
+        string url,
+        string accessToken,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+        var recordedHeaders = new[] { $"Authorization: Bearer <{accessToken.Length} chars, redacted>" };
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+            var body = string.Empty;
+            long? written = null;
+
+            if (response.IsSuccessStatusCode)
+            {
+                await using var content = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var file = File.Create(destinationPath);
+                await content.CopyToAsync(file, cancellationToken);
+                written = file.Length;
+            }
+            else
+            {
+                var text = await response.Content.ReadAsStringAsync(cancellationToken);
+                body = text.Length <= MaxBodyLength ? text : text[..MaxBodyLength];
+            }
+
+            stopwatch.Stop();
+
+            return new HttpObservation(
+                Method: "GET",
+                Url: url,
+                RequestHeaders: recordedHeaders,
+                StatusCode: (int)response.StatusCode,
+                ReasonPhrase: response.ReasonPhrase ?? ((HttpStatusCode)response.StatusCode).ToString(),
+                Body: body,
+                ElapsedMs: stopwatch.ElapsedMilliseconds,
+                TransportError: null)
+            {
+                ResponseHeaders = CollectHeaders(response),
+                DownloadedBytes = written,
             };
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

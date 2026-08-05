@@ -58,6 +58,12 @@ public static class Program
                 ProbeOptionsLoader.AclCommand =>
                     await RunAclAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.MipCommand =>
+                    await new MipProbe(Console.Out).RunAsync(cancellation.Token),
+
+                ProbeOptionsLoader.ConsumeCommand =>
+                    await RunConsumeAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -93,6 +99,12 @@ public static class Program
         return await new AclProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunConsumeAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new ConsumeProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -121,6 +133,10 @@ public static class Program
         writer.WriteLine("              issued, next to what the resource does about it");
         writer.WriteLine("  acl         can a page of items' permissions be fetched in one call instead of one");
         writer.WriteLine("              call per item? three candidate routes against the one-at-a-time baseline");
+        writer.WriteLine("  mip         can this build reach the Information Protection SDK at all? needs no");
+        writer.WriteLine("              configuration and no tenant - it asks about this machine, not about M365");
+        writer.WriteLine("  consume     open one protected file once per DelegatedUserEmail, plus once with the");
+        writer.WriteLine("              value unset, and report what licence the protection service issued");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
@@ -141,6 +157,13 @@ public static class Program
         writer.WriteLine("grants, proving itself with a key instead of the secret. Both are asked in one run, so");
         writer.WriteLine("nothing but the proof of identity differs between them. Left empty, that leg is reported");
         writer.WriteLine("as not run, with the reason, rather than left out.");
+        writer.WriteLine();
+        writer.WriteLine("'consume' takes its file from one of two places, never both: ProtectedFilePath, a path on");
+        writer.WriteLine("this machine, or ProtectedSiteFile, a path inside the site's document library which the");
+        writer.WriteLine("app fetches with its own token and deletes when the run ends. The second needs SiteUrl,");
+        writer.WriteLine("and exists so a run with nobody at the keyboard still has a file to open - and so that");
+        writer.WriteLine("which file is being opened stays a run's input rather than something stored beside a");
+        writer.WriteLine("credential. The fetch is measured like any other call.");
         writer.WriteLine();
         writer.WriteLine("FilePaths takes one or more paths separated by '|'. Each is relative to the root of the");
         writer.WriteLine("site's default document library and does not include the library's own name: a file");

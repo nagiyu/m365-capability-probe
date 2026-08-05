@@ -76,8 +76,12 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
             report.MarkIncomplete(incomplete);
         }
 
-        if (signIn.Succeeded)
+        if (signIn.Succeeded || !delegated.Enabled)
         {
+            // Every audience is asked, and when the run was narrowed to app-only every answer comes
+            // back as a request that was never issued - carrying that reason, without a network call.
+            // Leaving these empty instead made two of the three rows say the sign-in had not been
+            // completed, which is a different thing from nobody having been asked to complete one.
             foreach (var audience in Audiences)
             {
                 results[(audience, ProbeMode.Delegated)] = await delegated.GetTokenAsync(audience, cancellationToken);
@@ -85,8 +89,9 @@ public sealed class AuthProbe(ProbeOptions options, TextWriter console)
         }
         else
         {
-            // Sign-in is itself the delegated Graph token request, so that cell is measured.
-            // The other two audiences were never reached and must not read as anything else.
+            // A device code was printed and left uncompleted. Sign-in is itself the delegated Graph
+            // token request, so that cell is measured; the other two were never reached, and there is
+            // no answer to record for them at all.
             results[(ProbeAudience.Graph, ProbeMode.Delegated)] = signIn;
             results[(ProbeAudience.SharePoint, ProbeMode.Delegated)] = null;
             results[(ProbeAudience.AzureRms, ProbeMode.Delegated)] = null;

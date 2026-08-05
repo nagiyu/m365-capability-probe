@@ -32,10 +32,32 @@ audience のトークン 2 つが、SharePoint REST から違う答えを返さ�
 
 ## やらないこと
 
-保護されたファイルの復号、サイト全体の走査、スループットの測定、差分の追跡はしません。失敗する
-呼び出しを成功させようともしません。**そして、何が起きるべきかについて意見を持ちません。** 拒否も、
-空の一覧も、何も持たないトークンも、すべて等しく測定値として報告されます。それが良い知らせなのか
-悪い知らせなのかは、読み手が何を確かめに来たかによります。
+サイト全体の走査、スループットの測定、差分の追跡はしません。失敗する呼び出しを成功させようとも
+しません。**そして、何が起きるべきかについて意見を持ちません。** 拒否も、空の一覧も、何も持たない
+トークンも、すべて等しく測定値として報告されます。それが良い知らせなのか悪い知らせなのかは、
+読み手が何を確かめに来たかによります。
+
+### 一度だけ、方針を曲げた場所があります
+
+**MVP の間、この 2 つは「やらないこと」でした。**
+
+> 保護されたファイルの復号はしません
+> Graph SDK は使いません ― SDK が隠すと目的を失うからです
+
+**MIP (Information Protection) SDK を使う経路だけ、この 2 つを外しました。** `FileEngineSettings`
+の `DelegatedUserEmail` に入れた値が認可に効いているのか、という問いは、**SDK を通さないと立てられ
+ません**。復号もそうで、「開けたか / 拒否されたか」は開いてみないと分かりません。
+
+**代わりに線を引き直しました。**
+
+- **SDK を使うのは MIP の経路だけ。** `auth` / `access` / `sharepoint` / `acl` は今までどおり
+  `HttpClient` 直叩きで、URL もヘッダもレポートに出ます
+- **復号した中身はどこにも書き出しません。** 測るのは「開けたか」であって、平文ではありません。
+  **保護解除ツールにはしません**
+- **SDK が隠すものは隠されたまま**だと明記します。MIP の経路のレポートには「どの URL を叩いたか」が
+  ありません ― それは測れていない、ということです
+
+MVP の制約は MVP のためのものでした。**外した理由と、外していない範囲を、ここに残します。**
 
 ## 必要なもの
 
@@ -43,6 +65,39 @@ audience のトークン 2 つが、SharePoint REST から違う答えを返さ�
 - 調べたいテナントの Entra アプリ登録
 - ドキュメント ライブラリにファイルが 1 つ以上ある SharePoint サイト
 - そのサイトを見られる、管理者ではないアカウント (委任側で使います)
+- **`mip` を使うなら Linux (x86_64)**。Docker で用意できます ― 下記
+
+### Docker
+
+`mip` の経路だけ **Linux が要ります**。MIP SDK は**プラットフォームごとに別の NuGet パッケージ**で、
+ネイティブを持っているのはその中身だけです ― 既定の `Microsoft.InformationProtection.File` に
+入っているのは `win7-x64` / `x86` / `arm64` で、`.so` は 1 つもありません。このリポジトリは
+**`...File.Ubuntu2404`** を参照します。
+
+```bash
+docker build -t capability-probe .
+docker run --rm capability-probe mip
+
+# レポートを手元に残すなら
+docker run --rm -v "$PWD/reports:/work/reports" capability-probe mip
+```
+
+**マウントしないとレポートはコンテナと一緒に消えます。** 表はログに出るので `mip` では困りませんが、
+テナントを測るサブコマンドでは JSON のほうが本体です。
+
+**`mip` はテナントも設定も要りません。** 訊いているのは「この環境でそもそも測れるのか」だけです。
+5 つのネイティブが置かれているか、それが link している 10 個のシステム ライブラリを読み込めるか、
+そして `MIP.Initialize` が通るか。
+
+システム ライブラリの一覧は **バイナリを `objdump` して作ったもの**で、文書から写したものではありません。
+1 つ欠けると SDK は `LoadLibrary failed with error code 0` としか言わず、**失敗したライブラリの名前は
+出ますが、見つからなかったライブラリの名前は出ません**。`mip` の表はその後者を出します。
+
+他のサブコマンドに Linux は要りません。`.NET` が動けばどこでも動きます。
+
+**Ubuntu 22.04 ではなく 24.04 なのは、.NET 10 に 22.04 のイメージが無いから**です
+(`sdk:10.0-jammy` は存在せず、`10.0-noble` はあります)。SDK 側は `Ubuntu2204` も同じ 1.18.124 が
+あるので、22.04 に寄せたい場合は Dockerfile とパッケージ名の 2 箇所を変えれば足ります。
 
 ## アプリ登録の設定
 
@@ -108,6 +163,15 @@ Export-PfxCertificate    -Cert $cert -FilePath probe.pfx -Password (Read-Host -A
 | `ClientCertificatePath` | (任意) 秘密鍵を含む `.pfx` のパス |
 | `ClientCertificatePassword` | (任意) その `.pfx` のパスワード。無ければ空のまま |
 | `Identities` | (任意) `all`（既定）または `app-only` |
+
+`consume` だけが使うキーが 4 つあります。
+
+| キー | 内容 |
+| --- | --- |
+| `ProtectedSiteFile` | 開く保護済みファイルの、**ライブラリ内のパス**。例 `/probe.docx`。`SiteUrl` が要る |
+| `ProtectedFilePath` | 開く保護済みファイルの、**このマシン上のパス**。上と**同時には設定できない** |
+| `DelegatedUserEmails` | `DelegatedUserEmail` に入れるアドレス。`\|` 区切りで複数。**未設定のレグは常に 1 本足される** |
+| `MipIdentityEmail` | (任意) `Identity` をここに固定する。空なら `Identity` は `DelegatedUserEmail` と一緒に動く |
 
 **`Identities=app-only` は委任レグを丸ごと見送ります。** デバイス コードは表示されず、人の代理としては
 ID プロバイダーに何も訊きません。`DelegatedUserHint` も要求されなくなります（使う相手がいないので）。
@@ -194,6 +258,9 @@ Subcommand readiness:
 dotnet run --project src/CapabilityProbe.Cli -- auth
 dotnet run --project src/CapabilityProbe.Cli -- access
 dotnet run --project src/CapabilityProbe.Cli -- sharepoint
+dotnet run --project src/CapabilityProbe.Cli -- acl
+dotnet run --project src/CapabilityProbe.Cli -- mip       # Linux のみ。設定は要らない
+dotnet run --project src/CapabilityProbe.Cli -- consume    # Linux のみ
 ```
 
 任意のキーは実行ごとに上書きできます。
@@ -370,6 +437,23 @@ base64 -w0 probe.pfx | pbcopy   # あるいは > probe.b64
 
 **シークレットを設定しなければ、証明書レグは「要求を出していない」として報告されます。** ジョブは
 失敗しません ― 証明書が無いこと自体が測定結果だからです。
+
+**`consume` で開くファイルはシークレットではありません。** シークレットに置くのは実行ごとに変わらない
+値だけで、**どのファイルを開くのかは、その実行が何を測るのかそのもの**だからです。ファイルは
+**SharePoint のライブラリに置いて、パスだけを dispatch の入力 (`protected_site_file`) で渡します** ―
+`FilePaths` と同じ形です。アプリは app-only の Graph トークンでそれを取ってきて、実行が終われば
+消します。取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) もレポートに測定として並びます。
+
+**Graph が保護されたままのバイト列を返すのか、復号済みを返すのかは確かめていません。** 復号済みで
+返ってくればこの実験は成立しませんが、**プローブが `protected: no` と報告するのでそうと分かります** ―
+それはそれで所見です。
+
+手元のファイルを開きたいときは `ProtectedFilePath` がそのまま残っています。**両方は設定できません**
+(片方が黙って無視される読み方しか無いため、設定エラーになります)。
+
+**`consume` と `mip` は Actions で完結します。** ランナーは Ubuntu 24.04 で、SDK が link している
+3 つのパッケージだけワークフローが入れます (`mip` が実行時に確認している一覧と同じもの)。
+Docker は手元で回したいときのためのもので、Actions には要りません。
 
 **dispatch の `identities` は既定で `app-only` です。** ランナーにはブラウザも人もいないので、
 そちらを既定にしてあります。`all` を選ぶと従来どおり、**ログにデバイス コードが出て、誰かが見に行く
@@ -582,6 +666,55 @@ JSON にはアイテム 1 件あたりの呼び出し回数も入ります。**�
 4 件で 5 回対 2 回は小さな差ですが、**差が開き続ける**ことのほうが所見です。詳しくは
 [docs/findings.md](docs/findings.md) の所見 8。
 
+### `mip`
+
+**このビルドから MIP SDK に届くか**を訊きます。**設定もテナントも要りません** ― 訊いている相手は
+このマシンであって M365 ではないからです。`.so` が 5 つ揃っているかを見て、SDK が link している
+システム ライブラリを 1 つずつ `NativeLibrary.TryLoad` にかけ、最後に `MIP.Initialize` を呼びます。
+
+1 つずつ読み込むのは、**SDK の失敗が `LoadLibrary failed with error code 0` としか言わない**からです ―
+それは**落ちたライブラリの名前は言いますが、見つけられなかったライブラリの名前は言いません**。
+
+### `consume`
+
+**1 つの保護済みファイルを、`DelegatedUserEmail` の値だけ変えて何度も開き**、保護サービスが何を
+発行したかを並べます。**設定したアドレスごとに 1 本、それに加えて値を未設定にしたレグが必ず 1 本**
+走ります。**未設定のレグが無いと、「値が効いている」と「値は必須だが読まれていない」が同じ形に
+見えます。**
+
+```bash
+dotnet run --project src/CapabilityProbe.Cli -- consume \
+  --ProtectedSiteFile=/probe.docx \
+  --DelegatedUserEmails="a@example.com|b@example.com" \
+  --MipIdentityEmail=a@example.com
+```
+
+- **どのアドレスが権利を持っているはずか、ツールは知りません。** 全部走らせて返ってきたものを
+  報告します。どれが対照だったのかは、日付と理由を持てる散文の側の話です
+- **`MipIdentityEmail` を設定すると `Identity` が止まり、動くのは `DelegatedUserEmail` だけ**に
+  なります。設定しなければ 2 つは一緒に動き、レグ間の差は**ペアについての事実**になります。
+  どちらで走ったかはレポートの先頭に出ます
+- **ライセンスのキャッシュはメモリだけ**です。ディスクに残ると、後のレグが前のレグの判断で
+  答えてしまい、レグ間の比較そのものが壊れます
+- **復号したストリームは長さしか読みません。** 中身はどこにも書き出しません
+- ファイルは実行の終わりに消します（取得した場合）
+
+`ProtectedSiteFile` を使うと、取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) も
+**測定として並びます**。取れなければレグは `NotRun` になり、理由が残ります。
+
+実テナントで出た形が、これです。**`Identity` を固定した回と、固定先を変えた回を並べています。**
+
+| `Identity` | `DelegatedUserEmail` | 結果 | 発行先 |
+| --- | --- | --- | --- |
+| miku | miku | **開く** | miku |
+| **rin** | **miku** | **開く** | **miku** |
+| miku / rin | rin | `NoPermissionsException` | - |
+| miku / rin | (空) | `NoPermissionsException` | - |
+
+**列だけで結果が決まっています。`DelegatedUserEmail` が単独で認可を決めており、`Identity` は
+「空でないこと」しか要求されていません。** リンを名乗ったままミクを名指しすると、**ミクの
+ライセンスが返ります**。詳しくは [docs/findings.md](docs/findings.md) の所見 9。
+
 ## 出力の読み方
 
 レポートの各行は 3 つのものを持ちます。
@@ -623,7 +756,9 @@ src/CapabilityProbe.Cli/
                       AppOnlyTokenSource, DelegatedTokenSource, AuthErrorCode, TokenClaims
   Http/               ProbeHttpClient ― ステータスと本文を返し、応答で例外を投げない
                       ApiError ― Graph と SharePoint で形の違うエラーから code と message を取る
-  Probes/             AuthProbe, AccessProbe, SharePointProbe, AclProbe
+  Auth/MipAuthDelegate ― SDK が要求してきた authority と resource をそのまま記録する
+                      (URL を決めるのがツールでなくなるので、何を訊かれたかは測定になる)
+  Probes/             AuthProbe, AccessProbe, SharePointProbe, AclProbe, MipProbe, ConsumeProbe
                       SharePointResponses / AclResponses ― 応答の解釈。テナントが無いと実行され
                       ない部分なので呼び出し側と分けてある
                       PermissionSummary ― 権限エントリの数え方。access と acl で共有している
