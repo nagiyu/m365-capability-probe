@@ -702,6 +702,19 @@ dotnet run --project src/CapabilityProbe.Cli -- consume \
 `ProtectedSiteFile` を使うと、取得の 3 呼び出し (サイト解決 / アイテム解決 / `/content`) も
 **測定として並びます**。取れなければレグは `NotRun` になり、理由が残ります。
 
+実テナントで出た形が、これです。**`Identity` を固定した回と、固定先を変えた回を並べています。**
+
+| `Identity` | `DelegatedUserEmail` | 結果 | 発行先 |
+| --- | --- | --- | --- |
+| miku | miku | **開く** | miku |
+| **rin** | **miku** | **開く** | **miku** |
+| miku / rin | rin | `NoPermissionsException` | - |
+| miku / rin | (空) | `NoPermissionsException` | - |
+
+**列だけで結果が決まっています。`DelegatedUserEmail` が単独で認可を決めており、`Identity` は
+「空でないこと」しか要求されていません。** リンを名乗ったままミクを名指しすると、**ミクの
+ライセンスが返ります**。詳しくは [docs/findings.md](docs/findings.md) の所見 9。
+
 ## 出力の読み方
 
 レポートの各行は 3 つのものを持ちます。
