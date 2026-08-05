@@ -216,6 +216,18 @@ public sealed class AclProbe(ProbeOptions options, ProbeHttpClient http, TextWri
         report.Subject["site"] = options.SiteUrl;
         report.Subject["hint"] = options.DelegatedUserHint;
 
+        // Both of these decide how much of the library the numbers below are about, and neither one
+        // shows up anywhere else in the report. A run whose page size silently failed to arrive reads
+        // exactly like a library that did not need paging - which is what happened the first time.
+        report.Subject["page size"] = options.RequestedPageSize is { } size
+            ? $"$top={size}"
+            : options.PageSize.Trim().Length > 0
+                ? $"'{options.PageSize}' is not a page size, so none was asked for"
+                : "not set - whatever each service calls a page";
+        report.Subject["page limit"] =
+            $"{options.PagesToFollow} pages per route" +
+            (options.PageLimit.Trim().Length > 0 ? "" : " (the default)");
+
         console.WriteLine("Establishing the application identity (client credentials, shared secret)...");
         var secret = AppOnlyTokenSource.WithSecret(options);
 
