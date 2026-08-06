@@ -427,6 +427,7 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 6 追試 1・2. アプリの identity でも 403、ただし FullControl で 200 / 0 件 | 対象が `Limited Access System Group For List …` ― **所見 4 のための継承切断で生まれたとみられるグループ**で、`閲覧者` グループではありません |
 | 6 追試 3・4. 答えは 3 つと 3 つに割れる | サイトのグループが 6 つあり、うち 3 つが自動生成とみられるものであること / 管理者が作った 3 つに人が 0〜1 人ずついること |
 | 10 の訂正. ポリシーの一覧は `Custom` の所有者にしか返らない | **`TemplateBased` と `Custom` の 2 枚が同じ実行に並んでいる**こと / **リンが 2 枚とも所有者**であること (所有者を固定して保護の形だけを動かせる) / ミクが `VIEWRIGHTSDATA` を持っていること |
+| 14. Graph は読めないファイルを `false` と言う | **3 枚が暗号化されていることを別経路で測ってある**こと (所見 9〜12) / **ラベルの無い `test.docx` が同じ実行に並んでいる**こと (これが無いと `false` の意味が割れません) / **`EnableAIPIntegration` が `True`** であること (無効なら設定の話で終わっていました) |
 | 8 の追試 2. サービスも切る / `429` | **ライブラリが 257 件あること** (200 を越えないと Graph の既定ページが見えません) / **`$top` を渡さないこと** / **前・上げ・戻しの 3 回を測ったこと** (これが無いと `429` を権限のせいにしていました) |
 | 8 の追試 1. 束取りはページを追う | **`$top=2` を渡せること** (7 件のライブラリでページを割るため) / **SharePoint 付与を `FullControl.All` に上げたこと** (C が通らないとページを追う機会がありません) / **証明書があること** / **前と戻しの両方を測ったこと** |
 | 13. 循環は作れる / 輪は畳まれる / `null` は伏せ字 | **`probe-cycle-a` と `probe-cycle-b` が互いのメンバー**であること / **`probe-cycle-b` にミクが直接いる**こと (人がいないと空との区別がつきません) / **Graph Explorer から人がサインインして測った**こと ― プローブのアプリには何も足していません |
@@ -481,6 +482,9 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 2026-08-05 | **SharePoint のアプリケーション付与を `Sites.FullControl.All` に差し替え** (`Sites.Read.All` は削除)。**Graph と Azure RMS は無変更。** 前後に `auth` (#57 / #58) を回し、**動いたのが SharePoint の 1 行だけ**であることを確認。`acl` (#59) で **C が `200` / 5 呼び出し / 4 ページ / 8 件** ― **束取りの経路もページを追います** (所見 8 の追試 1) |
 | 2026-08-05 | **`Sites.Read.All` に戻した** (`Sites.FullControl.All` は削除)。`auth` (#60) が **#57 と一致**、`acl` (#61) が **#56 と一致**。**戻ったことも測定です** |
 | 2026-08-05 | **ライブラリに `probe-bulk-001.txt` 〜 `probe-bulk-250.txt` の 250 枚を追加** (Graph PowerShell から、中身はただのテキスト)。**A〜G と合わせて 257 件。** `acl` を `$top` 無しで 3 回 ― `Read.All` (#63) / `FullControl.All` (#65) / 戻し (#66)。**Graph の `/children` は 200 件で自分から切り**、**#65 では `429` が出て ACL が 34 件欠けました**。**#63 と #66 が完全一致**したので、欠けは権限ではなく負荷です (所見 8 の追試 2) |
+| 2026-08-06 | **テナントは無変更**（`Get-SPOTenant` の読み取りと Graph の GET / `extractSensitivityLabels` の POST のみ）。**`EnableAIPIntegration` は `True`**。それでも `_IpLabelId` / `_EffectiveIpLabelId` / `sensitivityLabel` はすべて空で、**`MetaInfo` にだけラベルが載っています**。`extractSensitivityLabels` は保護 3 枚に **`415` / `fileDecryptionNotSupported` / `unsupportedUser`**、`test.docx` に **`200` `{"labels":[]}`** (所見 14) |
+| 2026-08-06 | **Graph PowerShell に `Sites.Read.All` (委任) を追加同意。** 同意先は Microsoft の「Microsoft Graph Command Line Tools」で、**このプローブのアプリ登録は無変更**です |
+| 2026-08-06 | **SPO 管理シェル (`Microsoft.Online.SharePoint.PowerShell`) を導入し、`Get-SPOTenant` を読み取り。** 書き込みは 1 つもしていません |
 | 2026-08-05 | **250 枚を削除**し、`acl` (#67) が **#55 と完全一致**することを確認 ― 7 件 / 29 エントリ / 8 呼び出し / **1 ページ**。**ページ数が 2 から 1 に戻った**ことが、ページ数を決めていたのが件数だったことを示しています。**ライブラリは元通り**です |
 | 2026-08-05 | **Graph PowerShell (`Microsoft.Graph.Authentication`) に `Files.ReadWrite.All` (委任) を管理者同意。** 同意先は **Microsoft の「Microsoft Graph Command Line Tools」**で、**このプローブのアプリ登録は無変更**です。250 枚を置くためだけに使いました |
 | 2026-08-05 | **セキュリティ グループを 2 つ作成** (`probe-cycle-a` / `probe-cycle-b`) し、**互いを相手のメンバーに**して循環させ、`probe-cycle-b` にミクを直接追加。**ポータルは止めませんでした** (所見 13)。SharePoint のサイトにも秘密度ラベルにも紐付いていません |
