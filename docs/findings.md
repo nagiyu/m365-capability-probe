@@ -2168,7 +2168,11 @@ probe-cycle-a  ──メンバー──▶  probe-cycle-b  ──メンバー─
   プロパティ表に載っていません。実在は測りましたが、**契約はありません**
 - **このファセットが正しく返る例を、まだ見ていません。** このテナントでは 7 件すべて空か `false`
   なので、**「昇格が走ったときに正しい値が返る」ことは測れていません**
-- **app-only では測っていません。** 今日の測定はすべて管理者の委任です
+- ~~**app-only では測っていません。**~~ **測りました** (実行 #68、`inventory`)。
+  **app-only の証明書でも同じ形です** ― `extractSensitivityLabels` は保護 3 枚に
+  `415` / `notSupported` / `fileDecryptionNotSupported` / `unsupportedUser`、`test.docx` に
+  `200`。`sensitivityLabel` も 6 ファイルすべてで `protectionEnabled: false`。
+  **呼び出し元を変えても答えは動きませんでした**
 - **1 回の観測**です
 
 ---

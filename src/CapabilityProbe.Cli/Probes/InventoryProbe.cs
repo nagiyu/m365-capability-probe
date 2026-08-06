@@ -110,7 +110,9 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             Basis.ExtractedNoLabels => "extraction found no labels",
             Basis.ExtractedLabels => "labelled, but nothing said whether the label encrypts",
             Basis.NotAFile => "a folder",
-            Basis.Unresolved => $"nothing established it ({ExtractStatus ?? "not asked"})",
+            Basis.Unresolved => RefusalCode is null
+                ? $"nothing established it ({ExtractStatus ?? "not asked"})"
+                : $"refused, and not in a way this recognises ({RefusalCode})",
             _ => "nothing established it",
         };
     }
@@ -275,11 +277,14 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             return;
         }
 
-        // The code is nested: the outer one is generic, and the one that names decryption sits inside
-        // it. Both are read, innermost first, because the inner one is the one worth printing.
-        var code = InnermostErrorCode(observation);
-        item.RefusalCode = code;
-        item.Basis = code is not null && code.Contains("decryption", StringComparison.OrdinalIgnoreCase)
+        // The codes are nested several deep and the useful one is not reliably at either end. A real
+        // refusal here reads notSupported -> fileDecryptionNotSupported -> unsupportedUser: the
+        // generic one outermost, the one naming decryption in the middle, and a detail innermost.
+        // Taking the innermost was the first thing this did, and it classified every protected file as
+        // unresolved. So the whole chain is kept, and matched against the documented set.
+        var chain = ErrorCodeChain(observation);
+        item.RefusalCode = chain.Count > 0 ? string.Join(" / ", chain) : null;
+        item.Basis = chain.Any(c => UndecryptableCodes.Contains(c))
             ? Basis.Undecryptable
             : Basis.Unresolved;
     }
@@ -353,31 +358,47 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     }
 
     /// <summary>
-    /// Walks down the nested <c>innerError</c> chain and returns the deepest code. Graph wraps the
-    /// specific reason inside a generic one, and the specific one is the measurement.
+    /// The codes Microsoft documents for a refusal that means the file is encrypted in a way the
+    /// service cannot open. Matched as an exact set rather than by looking for "decryption" in the
+    /// text: a substring rule would quietly reclassify any future code that happens to contain the
+    /// word, and this column decides whether a document is reported as protected.
     /// </summary>
-    private static string? InnermostErrorCode(HttpObservation observation)
+    private static readonly HashSet<string> UndecryptableCodes = new(StringComparer.OrdinalIgnoreCase)
     {
+        "fileDecryptionNotSupported",
+        "fileDoubleKeyEncrypted",
+        "fileDecryptionDeferred",
+    };
+
+    /// <summary>
+    /// Every code in the nested <c>innerError</c> chain, outermost first. All of them are kept because
+    /// none of the positions is reliably the informative one, and because printing the chain is what
+    /// lets a reader see a refusal this tool did not recognise for what it was.
+    /// </summary>
+    private static IReadOnlyList<string> ErrorCodeChain(HttpObservation observation)
+    {
+        var codes = new List<string>();
         var root = Root(observation);
-        if (root is null || !root.Value.TryGetProperty("error", out var error))
+
+        if (root is null || !root.Value.TryGetProperty("error", out var current))
         {
-            return null;
+            return codes;
         }
 
-        string? code = Text(error, "code");
-        var current = error;
-
-        while (current.TryGetProperty("innerError", out var inner) && inner.ValueKind == JsonValueKind.Object)
+        while (true)
         {
-            if (Text(inner, "code") is { Length: > 0 } deeper)
+            if (Text(current, "code") is { Length: > 0 } code)
             {
-                code = deeper;
+                codes.Add(code);
+            }
+
+            if (!current.TryGetProperty("innerError", out var inner) || inner.ValueKind != JsonValueKind.Object)
+            {
+                return codes;
             }
 
             current = inner;
         }
-
-        return code;
     }
 
     private static string? CreatedBy(JsonElement entry) =>
