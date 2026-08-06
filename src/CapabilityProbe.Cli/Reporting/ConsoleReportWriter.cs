@@ -12,9 +12,17 @@ public sealed class ConsoleReportWriter(TextWriter writer)
         writer.WriteLine();
         writer.WriteLine($"=== {report.Command} =========================================================");
         writer.WriteLine($"started  {report.StartedAtUtc:u}");
+
+        // Widened to whatever the longest key needs. A fixed width silently ran the key into its own
+        // value once a probe introduced a longer one ('listing ended' printed as 'listing endedone
+        // page...'), which reads as a corrupted value rather than as a layout slip.
+        var keyWidth = report.Subject.Count == 0
+            ? 0
+            : Math.Max(10, report.Subject.Keys.Max(k => k.Length) + 2);
+
         foreach (var (key, value) in report.Subject)
         {
-            writer.WriteLine($"{key,-12}{value}");
+            writer.WriteLine($"{key.PadRight(keyWidth)}{value}");
         }
 
         foreach (var table in report.Tables)
