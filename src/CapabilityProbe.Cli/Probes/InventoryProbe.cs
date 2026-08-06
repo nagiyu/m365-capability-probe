@@ -31,6 +31,23 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 {
     private const string GraphBase = "https://graph.microsoft.com/v1.0";
 
+    /// <summary>SharePoint answers with a verbose envelope unless asked otherwise.</summary>
+    private const string SharePointAccept = "application/json;odata=nometadata";
+
+    /// <summary>
+    /// What section B asks the list for. Deliberately short.
+    /// <para>
+    /// Today's measuring found SharePoint's <c>$select</c> refusing named columns that
+    /// <c>/fields</c> plainly lists - a Lookup and a Computed one both came back as "does not exist" -
+    /// so anything selected here is a column that was watched arriving. The expansions carry no nested
+    /// <c>$select</c> for the same reason: expanding whole objects costs bytes and asks nothing of the
+    /// service's projection rules.
+    /// </para>
+    /// </summary>
+    private const string SharingQuery =
+        "$select=Id,FileLeafRef,FileRef,HasUniqueRoleAssignments" +
+        "&$expand=RoleAssignments/Member,RoleAssignments/RoleDefinitionBindings";
+
     /// <summary>
     /// What the listing is asked for. <c>sensitivityLabel</c> is not in Graph's documented property
     /// table for driveItem, in v1.0 or beta - it is asked for anyway because it answers the question
@@ -175,9 +192,15 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         report.Subject["listing ended"] = ending;
+
+        console.WriteLine("Asking the list who each item is shared with...");
+        var sharing = await ShareAsync(caller, source, siteId, token.AccessToken, calls, cancellationToken);
+
+        report.Subject["sharing ended"] = sharing.Ending;
         report.Subject["throttling"] = caller.Record.Summary;
 
         report.Add(BuildFileTable(items));
+        report.Add(BuildSharingTable(sharing));
         report.Add(BuildCallTable(calls));
 
         foreach (var item in items)
@@ -185,7 +208,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             report.Add(FileObservation(item));
         }
 
-        report.Add(CoverageObservation(items, caller.Record, ending));
+        report.Add(SharingObservation(sharing));
+        report.Add(CoverageObservation(items, sharing, caller.Record, ending));
         report.Finish();
         return report;
     }
@@ -287,6 +311,126 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         item.Basis = chain.Any(c => UndecryptableCodes.Contains(c))
             ? Basis.Undecryptable
             : Basis.Unresolved;
+    }
+
+    /// <summary>
+    /// What section B found, and how far it got. Kept as one value because the grants alone are
+    /// meaningless without knowing whether the walk finished - a short list and a truncated list look
+    /// identical once the reason is dropped.
+    /// </summary>
+    private sealed record Sharing(
+        IReadOnlyList<InventorySharing.Grant> Grants,
+        int Items,
+        int Pages,
+        string Ending,
+        string? Refusal,
+        string Walks);
+
+    /// <summary>
+    /// Who each item in the list is shared with, in one call per page rather than one per item.
+    /// <para>
+    /// This is the only bulk route that has ever worked here (finding 8), and it works through
+    /// SharePoint REST, which refuses a client secret outright and wants full control (finding 5 and
+    /// its follow-ups). All three of those conditions are recorded rather than assumed, because a
+    /// refusal here is far more likely to be one of them than a fact about the library.
+    /// </para>
+    /// <para>
+    /// It walks a different set from section A. Section A lists the root folder's children; this walks
+    /// every item in the list, at any depth. Two different counts are not a disagreement, and the
+    /// <c>walks</c> line says so on the report rather than leaving a reader to work it out - the same
+    /// column finding 8 had to grow for the same reason.
+    /// </para>
+    /// </summary>
+    private async Task<Sharing> ShareAsync(
+        ThrottleAwareCaller caller,
+        AppOnlyTokenSource source,
+        string siteId,
+        string graphToken,
+        List<HttpObservation> calls,
+        CancellationToken cancellationToken)
+    {
+        const string walks = "every item in the library list, at any depth";
+
+        var sharePoint = await source.GetTokenAsync(ProbeAudience.SharePoint, cancellationToken);
+        if (!sharePoint.Succeeded || sharePoint.AccessToken is null)
+        {
+            return new Sharing([], 0, 0, "no SharePoint token", 
+                sharePoint.Requested
+                    ? $"no SharePoint token was issued: {sharePoint.ErrorCode} - {sharePoint.ErrorDetail}"
+                    : $"no SharePoint token was requested: {sharePoint.ErrorDetail}",
+                walks);
+        }
+
+        // The library's server-relative path comes from Graph's answer for the same drive, so the two
+        // APIs are pointed at the same library rather than at whatever each of them would have picked.
+        var drive = await caller.GetAsync($"{GraphBase}/sites/{siteId}/drive", graphToken, cancellationToken);
+        calls.Add(drive);
+
+        var libraryPath = AclResponses.DriveServerRelativePath(drive);
+        if (libraryPath is null)
+        {
+            return new Sharing([], 0, 0, "the library path was never discovered",
+                $"the library path was never discovered ({drive.StatusText})", walks);
+        }
+
+        var grants = new List<InventorySharing.Grant>();
+        var items = 0;
+        var pages = 0;
+
+        string? next = $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
+                       $"/items?{SharingQuery}&$top={options.RequestedPageSize ?? 100}";
+
+        while (next is not null)
+        {
+            var observation = await caller.GetAsync(next, sharePoint.AccessToken, cancellationToken, SharePointAccept);
+            calls.Add(observation);
+            pages++;
+
+            var page = InventorySharing.ReadPage(observation);
+            if (page is null)
+            {
+                // A body the probe cut short is a fact about the probe, and must never be reported as
+                // a fact about the list. Expanding members and role names makes this response several
+                // times larger than the one finding 8 measured, so it is the likelier failure here.
+                var why = observation.BodyTruncated
+                    ? $"the probe cut the body short before it could be read ({observation.StatusText})"
+                    : Describe(observation);
+
+                return new Sharing(grants, items, pages,
+                    pages == 1 ? "the first page never came back" : $"page {pages} did not come back",
+                    why, walks);
+            }
+
+            grants.AddRange(page.Grants);
+            items += page.Items;
+            next = page.NextLink;
+
+            if (next is not null && pages >= options.PagesToFollow)
+            {
+                return new Sharing(grants, items, pages,
+                    $"stopped at the {options.PagesToFollow}-page limit - more was waiting", null, walks);
+            }
+        }
+
+        return new Sharing(grants, items, pages,
+            pages == 1 ? "one page, no continuation offered" : $"{pages} pages, then the collection ended",
+            null, walks);
+    }
+
+    /// <summary>
+    /// Why a page produced nothing. A refusal and a success whose body could not be read are different
+    /// things, and used to print the same way.
+    /// </summary>
+    private static string Describe(HttpObservation observation)
+    {
+        if (observation.IsSuccess)
+        {
+            return $"{observation.StatusText}, but the body held no collection this could read";
+        }
+
+        var code = ApiError.Code(observation);
+        var message = code.Length > 0 ? code : observation.RefusalDiagnostic ?? "no reason given";
+        return $"{observation.StatusText}: {message}";
     }
 
     private static string EscapePath(string path) =>
@@ -468,6 +612,33 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 i.CreatedBy ?? "-",
             }).ToList());
 
+    /// <summary>
+    /// One row per grant, not per item: an item shared four ways is four facts, and collapsing them
+    /// into a count would lose exactly the part somebody reading an inventory came for.
+    /// </summary>
+    private static ProbeTable BuildSharingTable(Sharing sharing)
+    {
+        if (sharing.Grants.Count == 0)
+        {
+            return new ProbeTable(
+                $"Who each item is shared with ({sharing.Walks})",
+                ["item", "shared with", "what that principal is", "roles", "unique permissions"],
+                [[sharing.Refusal ?? "nothing came back", "-", "-", "-", "-"]]);
+        }
+
+        return new ProbeTable(
+            $"Who each item is shared with ({sharing.Walks})",
+            ["item", "shared with", "what that principal is", "roles", "unique permissions"],
+            sharing.Grants.Select(g => (IReadOnlyList<string?>)new[]
+            {
+                g.FileName ?? g.Path ?? g.ItemId,
+                g.PrincipalTitle,
+                g.Kind,
+                g.Roles.Count == 0 ? "(no role named)" : string.Join(", ", g.Roles),
+                g.HasUniqueRoleAssignments switch { true => "yes", false => "no (inherited)", null => "-" },
+            }).ToList());
+    }
+
     private static ProbeTable BuildCallTable(IReadOnlyList<HttpObservation> calls) =>
         new("Calls issued (each carried 'Authorization: Bearer <token>')",
             ["method", "url", "status", "ms", "error code"],
@@ -504,6 +675,47 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         };
     }
 
+    private static Observation SharingObservation(Sharing sharing)
+    {
+        if (sharing.Refusal is not null)
+        {
+            return Observation.Measured("who each item is shared with", $"nothing came back - {sharing.Refusal}") with
+            {
+                Details = new Dictionary<string, string?>
+                {
+                    ["walks"] = sharing.Walks,
+                    ["refusal"] = sharing.Refusal,
+                    ["ending"] = sharing.Ending,
+                    ["note"] = "the bulk route needs a certificate and full control (findings 5 and 8); " +
+                               "a refusal here is more likely to be one of those than a fact about the library",
+                },
+            };
+        }
+
+        var principals = sharing.Grants
+            .Select(g => g.PrincipalTitle)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+
+        return Observation.Measured(
+            "who each item is shared with",
+            $"{sharing.Items} items, {sharing.Grants.Count} grants naming {principals} distinct " +
+            $"principals, in {sharing.Pages} pages - {sharing.Ending}") with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["walks"] = sharing.Walks,
+                ["items"] = sharing.Items.ToString(),
+                ["grants"] = sharing.Grants.Count.ToString(),
+                ["distinctPrincipals"] = principals.ToString(),
+                ["pages"] = sharing.Pages.ToString(),
+                ["ending"] = sharing.Ending,
+                ["note"] = "this section walks the whole list; section A walks the root folder's " +
+                           "children. Two different counts are a difference of range, not a disagreement",
+            },
+        };
+    }
+
     /// <summary>
     /// The one line that says whether this report can be trusted as a whole. An inventory whose walk
     /// stopped early, or which left files unresolved, or which was throttled and gave up, is a partial
@@ -511,18 +723,21 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// fourteen findings warning about.
     /// </summary>
     private static Observation CoverageObservation(
-        IReadOnlyList<Item> items, ThrottleRecord throttling, string ending)
+        IReadOnlyList<Item> items, Sharing sharing, ThrottleRecord throttling, string ending)
     {
         var files = items.Count(i => !i.IsFolder);
         var unknown = items.Count(i => !i.IsFolder && i.Protected == "unknown");
 
         var complete = unknown == 0 &&
                        throttling.GaveUp == 0 &&
+                       sharing.Refusal is null &&
                        ending.Contains("ended", StringComparison.Ordinal);
 
         var observed = complete
-            ? $"{files} files, all resolved; the walk {ending}; {throttling.Summary}"
-            : $"{files} files, {unknown} unresolved; the walk {ending}; {throttling.Summary}";
+            ? $"{files} files, all resolved; sharing read; the walk {ending}; {throttling.Summary}"
+            : $"{files} files, {unknown} unresolved; " +
+              (sharing.Refusal is null ? "sharing read" : "sharing NOT read") +
+              $"; the walk {ending}; {throttling.Summary}";
 
         return Observation.Measured("is this inventory complete", observed) with
         {
@@ -531,12 +746,14 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["files"] = files.ToString(),
                 ["unresolved"] = unknown.ToString(),
                 ["listingEnded"] = ending,
+                ["sharingEnded"] = sharing.Ending,
+                ["sharingRefusal"] = sharing.Refusal,
                 ["throttledCalls"] = throttling.Throttled.ToString(),
                 ["gaveUp"] = throttling.GaveUp.ToString(),
                 ["waitedMs"] = throttling.WaitedMs.ToString(),
                 ["complete"] = complete.ToString(),
                 ["note"] = complete
-                    ? "every file got an answer and nothing was left waiting"
+                    ? "every file got an answer, the sharing read, and nothing was left waiting"
                     : "this is a partial answer - the counts above say which part is missing",
             },
         };
