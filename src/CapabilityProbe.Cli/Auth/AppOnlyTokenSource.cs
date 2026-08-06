@@ -68,29 +68,52 @@ public sealed class AppOnlyTokenSource : ITokenSource
     /// </summary>
     public TokenCredential? Credential => _credential;
 
-    public static AppOnlyTokenSource WithSecret(ProbeOptions options) =>
-        new(options,
+    /// <param name="app">
+    /// Which registration to speak as. Defaults to the probe's own; <c>inventory</c> passes a second
+    /// one. The tenant, the scopes and everything else about the run stay the same - only the identity
+    /// being proved changes, which is the whole point of being able to pass it.
+    /// </param>
+    public static AppOnlyTokenSource WithSecret(ProbeOptions options, AppCredentials? app = null)
+    {
+        var credentials = app ?? options.ProbeApp;
+
+        if (credentials.IsEmpty || string.IsNullOrWhiteSpace(credentials.ClientSecret))
+        {
+            return new AppOnlyTokenSource(
+                options,
+                ProbeMode.AppOnly,
+                null,
+                "(no client secret configured)",
+                "NoSecretConfigured",
+                $"no client secret is configured for {credentials.Label}");
+        }
+
+        return new AppOnlyTokenSource(
+            options,
             ProbeMode.AppOnly,
-            new ClientSecretCredential(options.TenantId, options.ClientId, options.ClientSecret),
-            $"client secret, {options.ClientSecret.Length} characters");
+            new ClientSecretCredential(credentials.TenantId, credentials.ClientId, credentials.ClientSecret),
+            $"client secret, {credentials.ClientSecret.Length} characters");
+    }
 
     /// <summary>
     /// The same app registration, authenticating with a private key instead. Every reason this cannot
     /// be done comes back as a source that reports itself unavailable, so the leg appears in the report
     /// with a reason rather than disappearing from it.
     /// </summary>
-    public static AppOnlyTokenSource WithCertificate(ProbeOptions options)
+    public static AppOnlyTokenSource WithCertificate(ProbeOptions options, AppCredentials? app = null)
     {
-        if (!options.HasCertificate)
+        var credentials = app ?? options.ProbeApp;
+
+        if (!credentials.HasCertificate)
         {
             return Unavailable(
                 options,
                 "NoCertificateConfigured",
-                "ClientCertificatePath is empty, so no certificate leg was attempted",
+                $"no certificate path is configured for {credentials.Label}, so no certificate leg was attempted",
                 "(no certificate configured)");
         }
 
-        var path = options.ClientCertificatePath;
+        var path = credentials.CertificatePath;
         if (!File.Exists(path))
         {
             return Unavailable(
@@ -103,7 +126,7 @@ public sealed class AppOnlyTokenSource : ITokenSource
         X509Certificate2 certificate;
         try
         {
-            certificate = Load(path, options.ClientCertificatePassword);
+            certificate = Load(path, credentials.CertificatePassword);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -131,7 +154,7 @@ public sealed class AppOnlyTokenSource : ITokenSource
         return new AppOnlyTokenSource(
             options,
             ProbeMode.AppOnlyCertificate,
-            new ClientCertificateCredential(options.TenantId, options.ClientId, certificate),
+            new ClientCertificateCredential(credentials.TenantId, credentials.ClientId, certificate),
             $"certificate {certificate.Thumbprint}, subject {certificate.Subject}, " +
             $"not after {certificate.NotAfter:yyyy-MM-dd}");
     }
