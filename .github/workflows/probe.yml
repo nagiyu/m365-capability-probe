@@ -12,13 +12,13 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
       # for some choices. Left empty where it is needed, the probe stops and names the missing key.
       site_url:
-        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl)"
+        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory)"
         type: string
         required: false
         default: ""
@@ -141,6 +141,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libsecret-1-0 libgsf-1-114 libgmime-3.0-0
 
+      - name: Materialise the inventory certificate
+        env:
+          PFX_BASE64: ${{ secrets.PROBE_INVENTORYCERTIFICATE }}
+        run: |
+          set -eu
+
+          # Absent is the ordinary case: 'inventory' falls back to the probe's own registration and
+          # says in its report that it did. Only that subcommand looks at this at all.
+          if [ -z "${PFX_BASE64:-}" ]; then
+            echo "No PROBE_INVENTORYCERTIFICATE secret is set."
+            echo "'inventory' will speak as the probe's own app registration, and will say so."
+            exit 0
+          fi
+
+          printf '%s' "$PFX_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/inventory.pfx"
+          echo "PROBE_INVENTORYCERTIFICATEPATH=$RUNNER_TEMP/inventory.pfx" >> "$GITHUB_ENV"
+          echo "Wrote a $(wc -c < "$RUNNER_TEMP/inventory.pfx") byte certificate file for the inventory app."
+
       - name: Say what to watch for
         env:
           IDENTITIES: ${{ inputs.identities }}
@@ -191,6 +209,8 @@ jobs:
           PROBE_DELEGATEDUSEREMAILS: ${{ inputs.delegated_user_emails }}
           PROBE_MIPIDENTITYEMAIL: ${{ inputs.mip_identity_email }}
           PROBE_PROTECTEDSITEFILES: ${{ inputs.protected_site_files }}
+          PROBE_INVENTORYCLIENTID: ${{ secrets.PROBE_INVENTORYCLIENTID }}
+          PROBE_INVENTORYCERTIFICATEPASSWORD: ${{ secrets.PROBE_INVENTORYCERTIFICATEPASSWORD }}
           PROBE_PAGESIZE: ${{ inputs.page_size }}
           PROBE_PAGELIMIT: ${{ inputs.page_limit }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
