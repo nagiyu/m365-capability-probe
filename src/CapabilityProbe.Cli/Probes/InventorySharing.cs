@@ -24,13 +24,58 @@ public static class InventorySharing
         string? FileName,
         string? Path,
         bool? HasUniqueRoleAssignments,
+        int? PrincipalId,
         string PrincipalTitle,
         string? LoginName,
         int? PrincipalType,
         string Kind,
-        IReadOnlyList<string> Roles);
+        IReadOnlyList<Role> Roles);
+
+    /// <summary>
+    /// A role definition as it arrived, plus the one thing about it that matters to a reach report:
+    /// whether it lets its holder see the item at all.
+    /// <para>
+    /// The name cannot answer that. Run 71 came back in Japanese - 閲覧, 編集, 制限付きアクセス - because
+    /// the site is Japanese, so any rule written against English role names would have silently found
+    /// nothing to exclude and reported the widest possible reach. <see cref="GrantsView"/> reads the
+    /// permission mask instead, which is the same number in every locale.
+    /// </para>
+    /// </summary>
+    public sealed record Role(string Name, int? TypeKind, bool? GrantsView)
+    {
+        /// <summary>
+        /// Limited Access is the trap this exists for. SharePoint adds it to a parent list whenever
+        /// somebody is given access to one item inside, so a person granted one file appears on every
+        /// item in the library. Run 71 measured exactly that: one user held 閲覧 on a single document
+        /// and 制限付きアクセス on four others, and counting the latter as reach would have overstated
+        /// that person's access fivefold.
+        /// </summary>
+        /// <summary>
+        /// The permission mask decides. <c>RoleTypeKind</c> 1 - Guest, which is what Limited Access is
+        /// defined as - is a fallback for when the mask does not arrive, and a role with neither is
+        /// counted as reach rather than excluded: overstating what could not be established would hide
+        /// a grant, and a reach report that hides grants is worse than one that includes a doubtful
+        /// row and says so.
+        /// </summary>
+        public bool Reaches => GrantsView ?? TypeKind is not 1;
+
+        public string Describe => (GrantsView, TypeKind) switch
+        {
+            (true, _) => Name,
+            (false, _) => $"{Name} (no view)",
+            (null, 1) => $"{Name} (no view, by role type - no permission mask arrived)",
+            (null, _) => $"{Name} (capability unknown - no permission mask arrived)",
+        };
+    }
 
     public sealed record Page(IReadOnlyList<Grant> Grants, int Items, string? NextLink);
+
+    /// <summary>
+    /// <c>ViewListItems</c>, the low bit of SharePoint's base permission mask. Limited Access carries
+    /// Open and ViewFormPages but not this one, which is what makes it distinguishable from a role that
+    /// genuinely lets somebody read the document.
+    /// </summary>
+    private const ulong ViewListItems = 0x1;
 
     /// <summary>
     /// What SharePoint's numeric principal type means, per the CSOM enumeration. Anything outside it
@@ -134,17 +179,23 @@ public static class InventorySharing
                            pt.ValueKind == JsonValueKind.Number
                     ? pt.GetInt32()
                     : (int?)null;
+                var principalId = member.ValueKind == JsonValueKind.Object &&
+                                  member.TryGetProperty("Id", out var mid) &&
+                                  mid.ValueKind == JsonValueKind.Number
+                    ? mid.GetInt32()
+                    : (int?)null;
 
                 grants.Add(new Grant(
                     itemId,
                     fileName,
                     path,
                     unique,
+                    principalId,
                     title,
                     login,
                     type,
                     Classify(title, login, type),
-                    RoleNames(assignment)));
+                    Roles(assignment)));
             }
         }
 
@@ -159,10 +210,42 @@ public static class InventorySharing
     private static IEnumerable<JsonElement> Assignments(JsonElement entry) =>
         Collection(entry, "RoleAssignments");
 
-    private static IReadOnlyList<string> RoleNames(JsonElement assignment) =>
+    private static IReadOnlyList<Role> Roles(JsonElement assignment) =>
         Collection(assignment, "RoleDefinitionBindings")
-            .Select(b => Text(b, "Name") ?? "(unnamed role)")
+            .Select(b => new Role(
+                Text(b, "Name") ?? "(unnamed role)",
+                b.TryGetProperty("RoleTypeKind", out var kind) && kind.ValueKind == JsonValueKind.Number
+                    ? kind.GetInt32()
+                    : null,
+                GrantsView(b)))
             .ToList();
+
+    /// <summary>
+    /// Whether a role definition carries <c>ViewListItems</c>. Null when the mask did not arrive - the
+    /// probe does not ask for these fields by name (finding: SharePoint's <c>$select</c> refused named
+    /// columns that <c>/fields</c> lists), so it takes what the expansion happens to include, and an
+    /// absent mask must read as "not established" rather than as "no".
+    /// </summary>
+    private static bool? GrantsView(JsonElement binding)
+    {
+        if (!binding.TryGetProperty("BasePermissions", out var permissions) ||
+            permissions.ValueKind != JsonValueKind.Object ||
+            !permissions.TryGetProperty("Low", out var low))
+        {
+            return null;
+        }
+
+        // SharePoint sends the two halves of a 64-bit mask as strings under nometadata, because
+        // JavaScript cannot hold them as numbers. Both forms are read rather than assumed.
+        var raw = low.ValueKind switch
+        {
+            JsonValueKind.String => low.GetString(),
+            JsonValueKind.Number => low.GetRawText(),
+            _ => null,
+        };
+
+        return ulong.TryParse(raw, out var mask) ? (mask & ViewListItems) != 0 : null;
+    }
 
     private static IEnumerable<JsonElement> Collection(JsonElement parent, string property)
     {

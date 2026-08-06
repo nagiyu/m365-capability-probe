@@ -193,14 +193,26 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 
         report.Subject["listing ended"] = ending;
 
+        // Asked for once and carried through both sections. Section C needs the same token to read a
+        // SharePoint group's members, and a second acquisition would make a run where the two halves
+        // disagreed impossible to tell apart from a run where the token changed underneath them.
+        var sharePoint = await source.GetTokenAsync(ProbeAudience.SharePoint, cancellationToken);
+
         console.WriteLine("Asking the list who each item is shared with...");
-        var sharing = await ShareAsync(caller, source, siteId, token.AccessToken, calls, cancellationToken);
+        var sharing = await ShareAsync(caller, sharePoint, siteId, token.AccessToken, calls, cancellationToken);
 
         report.Subject["sharing ended"] = sharing.Ending;
+
+        console.WriteLine($"Turning {sharing.Grants.Count} grants into people...");
+        var reach = await new InventoryReach(caller, options.SiteUrl, options.PagesToFollow, calls)
+            .ResolveAsync(sharing.Grants, token.AccessToken, sharePoint.AccessToken, cancellationToken);
+
         report.Subject["throttling"] = caller.Record.Summary;
 
         report.Add(BuildFileTable(items));
         report.Add(BuildSharingTable(sharing));
+        report.Add(BuildReachTable(reach));
+        report.Add(BuildGapTable(reach));
         report.Add(BuildCallTable(calls));
 
         foreach (var item in items)
@@ -209,7 +221,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         report.Add(SharingObservation(sharing));
-        report.Add(CoverageObservation(items, sharing, caller.Record, ending));
+        report.Add(ReachObservation(reach, sharing));
+        report.Add(CoverageObservation(items, sharing, reach, caller.Record, ending));
         report.Finish();
         return report;
     }
@@ -343,7 +356,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// </summary>
     private async Task<Sharing> ShareAsync(
         ThrottleAwareCaller caller,
-        AppOnlyTokenSource source,
+        TokenResult sharePoint,
         string siteId,
         string graphToken,
         List<HttpObservation> calls,
@@ -351,7 +364,6 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     {
         const string walks = "every item in the library list, at any depth";
 
-        var sharePoint = await source.GetTokenAsync(ProbeAudience.SharePoint, cancellationToken);
         if (!sharePoint.Succeeded || sharePoint.AccessToken is null)
         {
             return new Sharing([], 0, 0, "no SharePoint token", 
@@ -634,10 +646,35 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 g.FileName ?? g.Path ?? g.ItemId,
                 g.PrincipalTitle,
                 g.Kind,
-                g.Roles.Count == 0 ? "(no role named)" : string.Join(", ", g.Roles),
+                g.Roles.Count == 0 ? "(no role named)" : string.Join(", ", g.Roles.Select(r => r.Describe)),
                 g.HasUniqueRoleAssignments switch { true => "yes", false => "no (inherited)", null => "-" },
             }).ToList());
     }
+
+    /// <summary>
+    /// The table the whole subcommand was asked for: the people, per file. It is printed next to the
+    /// gap table on purpose - this one alone would read as a complete answer, and it is only ever as
+    /// complete as the one after it says.
+    /// </summary>
+    private static ProbeTable BuildReachTable(InventoryReach.Result reach) =>
+        new("Who can actually open each file",
+            ["file", "person", "through", "role"],
+            reach.Rows.Count == 0
+                ? [["(nothing resolved to a person)", "-", "-", "-"]]
+                : reach.Rows.Select(r => (IReadOnlyList<string?>)new[] { r.Item, r.Person, r.Via, r.Roles }).ToList());
+
+    /// <summary>
+    /// Everything the table above does not account for. Two kinds live here and they are different
+    /// findings: a grant that was deliberately not counted as reach - Limited Access, almost always -
+    /// and a principal this could not turn into people at all. Both would otherwise be invisible, and
+    /// the second one is the one that makes a reach report wrong rather than merely narrow.
+    /// </summary>
+    private static ProbeTable BuildGapTable(InventoryReach.Result reach) =>
+        new("What is not in the table above, and why",
+            ["file", "principal", "why"],
+            reach.Gaps.Count == 0
+                ? [["(nothing)", "-", "every grant on every item resolved to people"]]
+                : reach.Gaps.Select(g => (IReadOnlyList<string?>)new[] { g.Item, g.Principal, g.Why }).ToList());
 
     private static ProbeTable BuildCallTable(IReadOnlyList<HttpObservation> calls) =>
         new("Calls issued (each carried 'Authorization: Bearer <token>')",
@@ -716,6 +753,37 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         };
     }
 
+    private static Observation ReachObservation(InventoryReach.Result reach, Sharing sharing)
+    {
+        if (sharing.Refusal is not null)
+        {
+            return Observation.NotRun(
+                "who can open each file",
+                "the grants were never read, so there was nothing to turn into people");
+        }
+
+        var notCounted = reach.Gaps.Count(g => g.Why.StartsWith("not counted", StringComparison.Ordinal));
+
+        return Observation.Measured(
+            "who can open each file",
+            $"{reach.DistinctPeople} distinct people across {reach.Rows.Count} file/person pairs; " +
+            $"{reach.PrincipalsResolved} principals expanded, {reach.PrincipalsUnresolved} could not be; " +
+            $"{notCounted} grants not counted as reach") with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["people"] = reach.DistinctPeople.ToString(),
+                ["pairs"] = reach.Rows.Count.ToString(),
+                ["principalsResolved"] = reach.PrincipalsResolved.ToString(),
+                ["principalsUnresolved"] = reach.PrincipalsUnresolved.ToString(),
+                ["grantsNotCountedAsReach"] = notCounted.ToString(),
+                ["note"] = "a grant carrying only Limited Access is not reach: SharePoint adds it to the " +
+                           "parent list whenever somebody is given one item inside, so counting it would " +
+                           "report that person on every item in the library",
+            },
+        };
+    }
+
     /// <summary>
     /// The one line that says whether this report can be trusted as a whole. An inventory whose walk
     /// stopped early, or which left files unresolved, or which was throttled and gave up, is a partial
@@ -723,7 +791,11 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// fourteen findings warning about.
     /// </summary>
     private static Observation CoverageObservation(
-        IReadOnlyList<Item> items, Sharing sharing, ThrottleRecord throttling, string ending)
+        IReadOnlyList<Item> items,
+        Sharing sharing,
+        InventoryReach.Result reach,
+        ThrottleRecord throttling,
+        string ending)
     {
         var files = items.Count(i => !i.IsFolder);
         var unknown = items.Count(i => !i.IsFolder && i.Protected == "unknown");
@@ -731,12 +803,15 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         var complete = unknown == 0 &&
                        throttling.GaveUp == 0 &&
                        sharing.Refusal is null &&
+                       reach.PrincipalsUnresolved == 0 &&
                        ending.Contains("ended", StringComparison.Ordinal);
 
         var observed = complete
-            ? $"{files} files, all resolved; sharing read; the walk {ending}; {throttling.Summary}"
+            ? $"{files} files, all resolved; sharing read; every principal expanded; " +
+              $"the walk {ending}; {throttling.Summary}"
             : $"{files} files, {unknown} unresolved; " +
               (sharing.Refusal is null ? "sharing read" : "sharing NOT read") +
+              $"; {reach.PrincipalsUnresolved} principals NOT expanded" +
               $"; the walk {ending}; {throttling.Summary}";
 
         return Observation.Measured("is this inventory complete", observed) with
@@ -748,6 +823,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["listingEnded"] = ending,
                 ["sharingEnded"] = sharing.Ending,
                 ["sharingRefusal"] = sharing.Refusal,
+                ["principalsUnresolved"] = reach.PrincipalsUnresolved.ToString(),
+                ["peopleNamed"] = reach.DistinctPeople.ToString(),
                 ["throttledCalls"] = throttling.Throttled.ToString(),
                 ["gaveUp"] = throttling.GaveUp.ToString(),
                 ["waitedMs"] = throttling.WaitedMs.ToString(),
