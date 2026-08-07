@@ -54,7 +54,15 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// and it was measured to arrive. Its absence would be a finding, not a crash, so nothing here
     /// depends on it being there.
     /// </summary>
-    private const string ListingSelect = "id,name,size,folder,file,webUrl,createdBy,sensitivityLabel";
+    private const string ListingSelect =
+        "id,name,size,folder,file,webUrl,createdBy,sensitivityLabel,sharepointIds,parentReference";
+
+    /// <summary>
+    /// How deep the walk will go. Folder trees do not contain cycles, so this is not a termination
+    /// guard - it is a bound on a library nobody expected to be this deep, and reaching it is reported
+    /// rather than treated as the end of the collection.
+    /// </summary>
+    private const int MaxDepth = 16;
 
     /// <summary>How a file's protection was established, in the order the tool tries to establish it.</summary>
     private enum Basis
@@ -85,6 +93,21 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     {
         public required string Id { get; init; }
         public required string Name { get; init; }
+
+        /// <summary>
+        /// Where in the library this sits. Once the walk recurses, the name stops identifying a file:
+        /// two folders may hold a <c>test.docx</c> apiece, and a table keyed on the name would merge
+        /// them into one row carrying the union of both files' facts.
+        /// </summary>
+        public required string Path { get; init; }
+
+        /// <summary>
+        /// The list item id from <c>sharepointIds</c>, which is what section B keys its grants on.
+        /// This is the join, and it is a number both APIs agree on rather than a name this tool
+        /// matched up itself.
+        /// </summary>
+        public string? ListItemId { get; init; }
+
         public bool IsFolder { get; init; }
         public long? Size { get; init; }
         public string? CreatedBy { get; init; }
@@ -212,10 +235,18 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 
         report.Subject["throttling"] = caller.Record.Summary;
 
+        // Built once and used by every table that needs both halves. Duplicate list item ids would
+        // mean two driveItems claiming one list item, which is not a thing SharePoint does - so the
+        // last one winning is a shape this does not have to defend against.
+        var byListItemId = items
+            .Where(i => i.ListItemId is not null)
+            .GroupBy(i => i.ListItemId!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Last(), StringComparer.Ordinal);
+
         report.Add(BuildFileTable(items));
         report.Add(BuildLinkTable(links));
         report.Add(BuildSharingTable(sharing));
-        report.Add(BuildReachTable(reach));
+        report.Add(BuildReachTable(reach, byListItemId));
         report.Add(BuildGapTable(reach));
         report.Add(BuildCallTable(calls));
 
@@ -227,6 +258,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         report.Add(SharingObservation(sharing));
         report.Add(LinkObservation(links));
         report.Add(ReachObservation(reach, sharing));
+        report.Add(JoinObservation(items, sharing, byListItemId));
         report.Add(CoverageObservation(items, sharing, reach, caller.Record, ending));
         report.Finish();
         return report;
@@ -255,8 +287,20 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     }
 
     /// <summary>
-    /// The root's children, following continuation links to the end. The page size is whatever the
-    /// service chooses: asking for a specific one would measure our own number back.
+    /// Every file in the library, walking into folders as it finds them. The page size is whatever
+    /// the service chooses: asking for a specific one would measure our own number back.
+    /// <para>
+    /// This used to stop at the root's children, which made the report two reports - section B walks
+    /// the whole list, so a file one folder down appeared there and nowhere else, and the two counts
+    /// could only be reconciled by reading the note explaining why they differed. Recursing is what
+    /// makes the join in <see cref="JoinObservation"/> mean something: with the same range on both
+    /// sides, a grant that matches no listed file is a finding rather than the expected case.
+    /// </para>
+    /// <para>
+    /// The page budget is spent across the whole walk rather than per folder. A library that exhausts
+    /// it has been partly read whichever way the budget is divided, and one number is easier to
+    /// report honestly than a number per folder.
+    /// </para>
     /// </summary>
     private async Task<(IReadOnlyList<Item> Items, string Ending)> ListAsync(
         ThrottleAwareCaller caller,
@@ -266,33 +310,63 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         CancellationToken cancellationToken)
     {
         var items = new List<Item>();
-        string? next = $"{GraphBase}/sites/{siteId}/drive/root/children?$select={ListingSelect}";
+        var folders = new Queue<(string? Id, string Path, int Depth)>();
+        folders.Enqueue((null, string.Empty, 0));
+
         var pages = 0;
+        var walked = 0;
+        var deepest = 0;
+        var tooDeep = 0;
 
-        while (next is not null)
+        while (folders.Count > 0)
         {
-            var page = await caller.GetAsync(next, token, cancellationToken);
-            calls.Add(page);
-            pages++;
+            var (folderId, folderPath, depth) = folders.Dequeue();
+            walked++;
+            deepest = Math.Max(deepest, depth);
 
-            var parsed = ReadPage(page);
-            if (parsed is null)
+            string? next = folderId is null
+                ? $"{GraphBase}/sites/{siteId}/drive/root/children?$select={ListingSelect}"
+                : $"{GraphBase}/sites/{siteId}/drive/items/{folderId}/children?$select={ListingSelect}";
+
+            while (next is not null)
             {
-                return (items, pages == 1
-                    ? $"the first page never came back ({page.StatusText})"
-                    : $"page {pages} did not come back ({page.StatusText})");
-            }
+                var page = await caller.GetAsync(next, token, cancellationToken);
+                calls.Add(page);
+                pages++;
 
-            items.AddRange(parsed.Value.Items);
-            next = parsed.Value.NextLink;
+                var parsed = ReadPage(page, folderPath);
+                if (parsed is null)
+                {
+                    // Whichever folder this was, everything under it is missing. Naming it is the
+                    // difference between a short answer and a wrong one.
+                    var where = folderPath.Length == 0 ? "the root" : folderPath;
+                    return (items, $"stopped inside {where} - a page did not come back ({page.StatusText})");
+                }
 
-            if (next is not null && pages >= options.PagesToFollow)
-            {
-                return (items, $"stopped at the {options.PagesToFollow}-page limit - more was waiting");
+                items.AddRange(parsed.Value.Items);
+
+                foreach (var folder in parsed.Value.Items.Where(i => i.IsFolder))
+                {
+                    if (depth + 1 > MaxDepth)
+                    {
+                        tooDeep++;
+                        continue;
+                    }
+
+                    folders.Enqueue((folder.Id, folder.Path, depth + 1));
+                }
+
+                next = parsed.Value.NextLink;
+
+                if (next is not null && pages >= options.PagesToFollow)
+                {
+                    return (items, $"stopped at the {options.PagesToFollow}-page limit - more was waiting");
+                }
             }
         }
 
-        return (items, pages == 1 ? "one page, no continuation offered" : $"{pages} pages, then the collection ended");
+        var ending = $"{walked} folders in {pages} pages, {deepest} levels deep, then the collection ended";
+        return (items, tooDeep == 0 ? ending : $"{ending}; {tooDeep} folders left unopened at the {MaxDepth}-level bound");
     }
 
     /// <summary>
@@ -363,10 +437,10 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             var observation = await caller.GetAsync(url, token, cancellationToken);
             calls.Add(observation);
 
-            var links = InventoryLinks.Read(observation, item.Name);
+            var links = InventoryLinks.Read(observation, item.Path);
             if (links is null)
             {
-                unread.Add($"{item.Name} ({Describe(observation)})");
+                unread.Add($"{item.Path} ({Describe(observation)})");
                 continue;
             }
 
@@ -398,10 +472,10 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// refusal here is far more likely to be one of them than a fact about the library.
     /// </para>
     /// <para>
-    /// It walks a different set from section A. Section A lists the root folder's children; this walks
-    /// every item in the list, at any depth. Two different counts are not a disagreement, and the
-    /// <c>walks</c> line says so on the report rather than leaving a reader to work it out - the same
-    /// column finding 8 had to grow for the same reason.
+    /// It reaches the same set section A does, but by a different route and in one call per page
+    /// rather than one per folder. That the two agree is not assumed: they are joined on the list item
+    /// id and the result is reported, because two APIs asked separately about "the library" have no
+    /// obligation to have meant the same thing.
     /// </para>
     /// </summary>
     private async Task<Sharing> ShareAsync(
@@ -498,7 +572,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     private static string EscapePath(string path) =>
         string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
 
-    private static (IReadOnlyList<Item> Items, string? NextLink)? ReadPage(HttpObservation observation)
+    private static (IReadOnlyList<Item> Items, string? NextLink)? ReadPage(
+        HttpObservation observation, string folderPath)
     {
         var root = Root(observation);
         if (root is null || !root.Value.TryGetProperty("value", out var value) ||
@@ -520,10 +595,22 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             var hasFacet = entry.TryGetProperty("sensitivityLabel", out var label) &&
                            label.ValueKind == JsonValueKind.Object;
 
+            var name = Text(entry, "name") ?? id.GetString()!;
+
             var item = new Item
             {
                 Id = id.GetString()!,
-                Name = Text(entry, "name") ?? id.GetString()!,
+                Name = name,
+
+                // Built from the folder this page was asked about rather than from parentReference.
+                // Graph writes that path in its own addressing scheme ("/drive/root:/restricted"),
+                // and rewriting it here would be one more thing to get wrong for no gain: the walk
+                // already knows where it is.
+                Path = folderPath.Length == 0 ? $"/{name}" : $"{folderPath}/{name}",
+                ListItemId = entry.TryGetProperty("sharepointIds", out var spIds) &&
+                             spIds.ValueKind == JsonValueKind.Object
+                    ? Text(spIds, "listItemId")
+                    : null,
                 IsFolder = isFolder,
                 Size = entry.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number
                     ? size.GetInt64()
@@ -656,7 +743,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
             ["file", "protected", "how we know", "the listing said", "label", "bytes", "created by"],
             items.Select(i => (IReadOnlyList<string?>)new[]
             {
-                i.Name,
+                i.Path,
                 i.Protected,
                 i.HowWeKnow,
                 i.IsFolder
@@ -743,12 +830,22 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     /// gap table on purpose - this one alone would read as a complete answer, and it is only ever as
     /// complete as the one after it says.
     /// </summary>
-    private static ProbeTable BuildReachTable(InventoryReach.Result reach) =>
+    private static ProbeTable BuildReachTable(
+        InventoryReach.Result reach, IReadOnlyDictionary<string, Item> byListItemId) =>
         new("Who can actually open each file",
-            ["file", "person", "through", "role"],
+            ["file", "person", "through", "role", "protected"],
             reach.Rows.Count == 0
-                ? [["(nothing resolved to a person)", "-", "-", "-"]]
-                : reach.Rows.Select(r => (IReadOnlyList<string?>)new[] { r.Item, r.Person, r.Via, r.Roles }).ToList());
+                ? [["(nothing resolved to a person)", "-", "-", "-", "-"]]
+                : reach.Rows.Select(r => (IReadOnlyList<string?>)new[]
+                {
+                    r.Item,
+                    r.Person,
+                    r.Via,
+                    r.Roles,
+                    byListItemId.TryGetValue(r.ItemKey, out var item)
+                        ? item.Protected
+                        : "(not in the listing)",
+                }).ToList());
 
     /// <summary>
     /// Everything the table above does not account for. Two kinds live here and they are different
@@ -763,6 +860,59 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ? [["(nothing)", "-", "every grant on every item resolved to people"]]
                 : reach.Gaps.Select(g => (IReadOnlyList<string?>)new[] { g.Item, g.Principal, g.Why }).ToList());
 
+    /// <summary>
+    /// Whether the two halves of this report are about the same set of files.
+    /// <para>
+    /// Graph and SharePoint were asked separately and answered separately; nothing so far has checked
+    /// that they were talking about the same library. They are joined on the list item id, which both
+    /// name - not on the file name, which would have looked correct on every run this tool has made
+    /// and broken the first time two folders held a file with the same name.
+    /// </para>
+    /// <para>
+    /// A grant on an item the listing never produced is the interesting failure: it means the walk
+    /// missed something section B could see. That was the ordinary case while section A stopped at the
+    /// root's children, and it is a finding now that it recurses.
+    /// </para>
+    /// </summary>
+    private static Observation JoinObservation(
+        IReadOnlyList<Item> items, Sharing sharing, IReadOnlyDictionary<string, Item> byListItemId)
+    {
+        if (sharing.Refusal is not null)
+        {
+            return Observation.NotRun(
+                "do the two halves describe the same files",
+                "the grants were never read, so there was nothing to join to");
+        }
+
+        var withoutId = items.Count(i => i.ListItemId is null);
+        var grantedIds = sharing.Grants.Select(g => g.ItemId).Distinct(StringComparer.Ordinal).ToList();
+        var unmatched = grantedIds.Where(id => !byListItemId.ContainsKey(id)).ToList();
+        var unshared = items.Where(i => i.ListItemId is not null && !grantedIds.Contains(i.ListItemId))
+            .Select(i => i.Path)
+            .ToList();
+
+        var joined = grantedIds.Count - unmatched.Count;
+
+        return Observation.Measured(
+            "do the two halves describe the same files",
+            $"{joined} of {grantedIds.Count} items with grants matched a listed file by list item id; " +
+            $"{unmatched.Count} did not, and {unshared.Count} listed files carried no grant" +
+            (withoutId == 0 ? "" : $"; {withoutId} listed items arrived with no sharepointIds")) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["listed"] = items.Count.ToString(),
+                ["listedWithoutSharePointId"] = withoutId.ToString(),
+                ["itemsWithGrants"] = grantedIds.Count.ToString(),
+                ["joined"] = joined.ToString(),
+                ["grantsOnUnlistedItems"] = unmatched.Count == 0 ? "0" : string.Join(", ", unmatched),
+                ["listedFilesWithNoGrant"] = unshared.Count == 0 ? "0" : string.Join(", ", unshared),
+                ["note"] = "joined on sharepointIds.listItemId, which both APIs name - not on the file " +
+                           "name, which would look correct until two folders held the same name",
+            },
+        };
+    }
+
     private static ProbeTable BuildCallTable(IReadOnlyList<HttpObservation> calls) =>
         new("Calls issued (each carried 'Authorization: Bearer <token>')",
             ["method", "url", "status", "ms", "error code"],
@@ -773,7 +923,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 
     private static Observation FileObservation(Item item)
     {
-        var subject = item.Name;
+        var subject = item.Path;
 
         if (item.IsFolder)
         {
@@ -834,8 +984,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["distinctPrincipals"] = principals.ToString(),
                 ["pages"] = sharing.Pages.ToString(),
                 ["ending"] = sharing.Ending,
-                ["note"] = "this section walks the whole list; section A walks the root folder's " +
-                           "children. Two different counts are a difference of range, not a disagreement",
+                ["note"] = "this section walks the list in one call per page; section A walks the " +
+                           "folder tree. Whether the two ranges match is reported separately, by id",
             },
         };
     }

@@ -87,11 +87,19 @@ public sealed class InventoryReach(
     /// <summary>What one principal turned out to contain, or why it did not.</summary>
     private sealed record Resolution(IReadOnlyList<Person> People, string? Gap, Outcome Outcome);
 
-    /// <summary>One (file, person) pair, with every route that put them there.</summary>
-    public sealed record Row(string Item, string Person, string Via, string Roles);
+    /// <summary>
+    /// One (file, person) pair, with every route that put them there.
+    /// <para>
+    /// <see cref="ItemKey"/> is the SharePoint list item id and <see cref="Item"/> is the path shown
+    /// to a reader. They are separate because the walk now recurses: two folders may each hold a
+    /// <c>test.docx</c>, and a row keyed on anything a person chose rather than on the id both APIs
+    /// agree about would merge two files into one.
+    /// </para>
+    /// </summary>
+    public sealed record Row(string ItemKey, string Item, string Person, string Via, string Roles);
 
     /// <summary>One thing this could not turn into people, and why. Never silently dropped.</summary>
-    public sealed record Gap(string Item, string Principal, string Why);
+    public sealed record Gap(string ItemKey, string Item, string Principal, string Why);
 
     public sealed record Result(
         IReadOnlyList<Row> Rows,
@@ -117,17 +125,18 @@ public sealed class InventoryReach(
     {
         // (item, person) -> the routes and roles that got them there. A person reachable two ways is
         // one row naming both, not two rows that read like two different people.
-        var reached = new Dictionary<(string Item, string Person), (SortedSet<string> Via, SortedSet<string> Roles)>();
+        var reached = new Dictionary<(string Key, string Person),
+            (string Item, SortedSet<string> Via, SortedSet<string> Roles)>();
         var gaps = new List<Gap>();
 
         foreach (var grant in grants)
         {
-            var item = grant.FileName ?? grant.Path ?? grant.ItemId;
+            var item = grant.Path ?? grant.FileName ?? grant.ItemId;
             var reaching = grant.Roles.Where(r => r.Reaches).ToList();
 
             if (reaching.Count == 0)
             {
-                gaps.Add(new Gap(item, grant.PrincipalTitle,
+                gaps.Add(new Gap(grant.ItemId, item, grant.PrincipalTitle,
                     $"not counted as reach: {string.Join(", ", grant.Roles.Select(r => r.Describe))}"));
                 continue;
             }
@@ -136,16 +145,17 @@ public sealed class InventoryReach(
 
             if (resolution.Gap is not null)
             {
-                gaps.Add(new Gap(item, grant.PrincipalTitle, resolution.Gap));
+                gaps.Add(new Gap(grant.ItemId, item, grant.PrincipalTitle, resolution.Gap));
             }
 
             var roles = string.Join(", ", reaching.Select(r => r.Describe));
             foreach (var person in resolution.People)
             {
-                var key = (item, person.Key);
+                var key = (grant.ItemId, person.Key);
                 if (!reached.TryGetValue(key, out var entry))
                 {
-                    entry = (new SortedSet<string>(StringComparer.OrdinalIgnoreCase),
+                    entry = (item,
+                             new SortedSet<string>(StringComparer.OrdinalIgnoreCase),
                              new SortedSet<string>(StringComparer.OrdinalIgnoreCase));
                     reached[key] = entry;
                 }
@@ -156,10 +166,11 @@ public sealed class InventoryReach(
         }
 
         var rows = reached
-            .OrderBy(e => e.Key.Item, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(e => e.Value.Item, StringComparer.OrdinalIgnoreCase)
             .ThenBy(e => e.Key.Person, StringComparer.OrdinalIgnoreCase)
             .Select(e => new Row(
-                e.Key.Item,
+                e.Key.Key,
+                e.Value.Item,
                 e.Key.Person,
                 string.Join(" + ", e.Value.Via),
                 string.Join(" / ", e.Value.Roles)))
