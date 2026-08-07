@@ -129,6 +129,28 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         public string? CarriedLabelId => InFile.Count == 1 ? InFile[0].Id : null;
 
         /// <summary>
+        /// The column that names the label the file carries, and what it holds. Named rather than
+        /// counted: run 78 reported "a column names it" without saying which, and a verdict whose
+        /// basis cannot be read is a verdict that has to be taken on trust.
+        /// </summary>
+        public KeyValuePair<string, string>? Match
+        {
+            get
+            {
+                var ids = InFile.Select(l => l.Id).ToList();
+                foreach (var column in Columns)
+                {
+                    if (ids.Any(id => column.Value.Contains(id, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return column;
+                    }
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Whether any of the list's label columns names the label the file carries.
         /// <para>
         /// Three answers, and the third is the point. <c>no</c> means the file has a label and the
@@ -166,10 +188,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                     return "?";
                 }
 
-                var ids = InFile.Select(l => l.Id).ToList();
-                return Columns.Any(c => ids.Any(id => c.Value.Contains(id, StringComparison.OrdinalIgnoreCase)))
-                    ? "yes"
-                    : "no";
+                return Match is null ? "no" : "yes";
             }
         }
     }
@@ -826,7 +845,8 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
 
         var observed = subject.Promoted switch
         {
-            "yes" => $"the file carries {subject.CarriedLabelId ?? "a label"}, and a column names it",
+            "yes" => $"the file carries {subject.CarriedLabelId ?? "a label"}, and " +
+                     $"{subject.Match!.Value.Key} holds \"{subject.Match!.Value.Value}\"",
             "no" => $"the file carries {subject.CarriedLabelId ?? "a label"}; no column names it",
             "-" => "the file carries no label",
             _ when subject.MetaInfoRead is not true =>
@@ -839,6 +859,12 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             Details = new Dictionary<string, string?>
             {
                 ["promoted"] = subject.Promoted,
+                ["matchingColumn"] = subject.Match?.Key,
+                ["matchingValue"] = subject.Match?.Value,
+                ["columnsRead"] = subject.Columns.Count == 0
+                    ? "(none)"
+                    : string.Join("; ", subject.Columns.Select(c =>
+                        $"{c.Key}={(c.Value.Length == 0 ? "(empty)" : c.Value)}")),
                 ["labelInFile"] = subject.InFile.Count == 0
                     ? null
                     : string.Join("; ", subject.InFile.Select(l => l.Describe)),
