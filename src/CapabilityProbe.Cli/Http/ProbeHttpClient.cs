@@ -157,6 +157,10 @@ public sealed class ProbeHttpClient : IDisposable
         "client-request-id",
         "SPRequestGuid",
         "Retry-After",
+
+        // How a service says it honoured a Prefer request header. Without it, a call that carried a
+        // preference and one that did not are told apart only by guessing from their bodies.
+        "Preference-Applied",
     ];
 
     private readonly HttpClient _http;
@@ -174,22 +178,33 @@ public sealed class ProbeHttpClient : IDisposable
     /// SharePoint answers with a verbose envelope unless asked otherwise. It is a parameter rather
     /// than a constant so the recorded headers stay a record of what was actually sent.
     /// </param>
+    /// <param name="extraHeaders">
+    /// Request headers beyond the two every call carries. They are recorded verbatim, because a run
+    /// whose whole subject is a header has to be able to prove which calls carried it - and a header
+    /// the service silently ignored looks exactly like one that was never sent.
+    /// </param>
     public async Task<HttpObservation> GetAsync(
         string url,
         string accessToken,
         CancellationToken cancellationToken,
-        string accept = "application/json")
+        string accept = "application/json",
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue.Parse(accept));
+
+        foreach (var (name, value) in extraHeaders ?? [])
+        {
+            request.Headers.TryAddWithoutValidation(name, value);
+        }
 
         // The bearer value is deliberately not recorded; its presence and shape are what matter.
         var recordedHeaders = new[]
         {
             $"Authorization: Bearer <{accessToken.Length} chars, redacted>",
             $"Accept: {accept}",
-        };
+        }.Concat((extraHeaders ?? []).Select(h => $"{h.Name}: {h.Value}")).ToArray();
 
         var stopwatch = Stopwatch.StartNew();
         try

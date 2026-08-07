@@ -29,17 +29,24 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string PromotionCommand = "promotion";
 
+    /// <summary>
+    /// What <c>Prefer: hierarchicalsharing</c> does to a drive's delta, and what it costs. The header
+    /// is documented as existing without its required permission being written down anywhere, which
+    /// makes it a thing to measure.
+    /// </summary>
+    public const string DeltaCommand = "delta";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
-        InventoryCommand, PromotionCommand,
+        InventoryCommand, PromotionCommand, DeltaCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
     private static readonly string[] NeedsApp =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
-        PromotionCommand,
+        PromotionCommand, DeltaCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -64,7 +71,7 @@ public static class ProbeOptionsLoader
     private static readonly string[] InventoryOnly = [InventoryCommand];
 
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
-    private static readonly string[] SiteReaders = [InventoryCommand, PromotionCommand];
+    private static readonly string[] SiteReaders = [InventoryCommand, PromotionCommand, DeltaCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a

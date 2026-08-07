@@ -83,8 +83,12 @@ public sealed class ThrottleAwareCaller(
     public ThrottleRecord Record { get; } = new();
 
     public Task<HttpObservation> GetAsync(
-        string url, string accessToken, CancellationToken cancellationToken, string accept = "application/json") =>
-        SendAsync(() => http.GetAsync(url, accessToken, cancellationToken, accept), cancellationToken);
+        string url,
+        string accessToken,
+        CancellationToken cancellationToken,
+        string accept = "application/json",
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null) =>
+        SendAsync(() => http.GetAsync(url, accessToken, cancellationToken, accept, extraHeaders), cancellationToken);
 
     public Task<HttpObservation> PostAsync(
         string url, string accessToken, CancellationToken cancellationToken, string? body = null) =>
