@@ -37,7 +37,7 @@ on:
         required: false
         default: ""
       file_paths:
-        description: "FilePaths - access and promotion. Several allowed, separated by '|'. No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
+        description: "FilePaths - access and promotion. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
         type: string
         required: false
         default: ""

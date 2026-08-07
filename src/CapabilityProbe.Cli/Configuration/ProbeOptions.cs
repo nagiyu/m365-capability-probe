@@ -59,7 +59,28 @@ public sealed class ProbeOptions
 
     /// <summary>The paths, split and trimmed. Empty when none are configured.</summary>
     public IReadOnlyList<string> Files =>
-        FilePaths.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Several(FilePaths);
+
+    /// <summary>
+    /// Splits a key that takes several values, on the ASCII pipe or on the full-width one.
+    /// <para>
+    /// Run 75 spent an entire round measuring nothing because a set of four paths arrived as one
+    /// string: the separator had been typed on a Japanese keyboard, where the pipe key produces
+    /// U+FF5C rather than U+007C, and the four paths became a single name that resolved to
+    /// <c>404 itemNotFound</c>. Nothing about that was the operator's mistake to make - the value is
+    /// entered in a web form, on a machine set to a language where the two characters sit under the
+    /// same key and look nearly identical in most fonts.
+    /// </para>
+    /// <para>
+    /// So both are accepted. No SharePoint path this tool addresses can contain either character
+    /// unescaped, and the split result is printed back in every report that uses one, so a run that
+    /// split somewhere unintended says so on its own face.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<string> Several(string value) =>
+        value.Split(
+            ['|', '\uFF5C'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>Sign-in name the operator should use for the delegated (device code) leg.</summary>
     public string DelegatedUserHint { get; set; } = string.Empty;
@@ -115,11 +136,11 @@ public sealed class ProbeOptions
 
     /// <summary>The site paths, split and trimmed.</summary>
     public IReadOnlyList<string> ProtectedSiteFileList =>
-        ProtectedSiteFiles.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Several(ProtectedSiteFiles);
 
     /// <summary>The local paths, split and trimmed.</summary>
     public IReadOnlyList<string> ProtectedFilePathList =>
-        ProtectedFilePaths.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Several(ProtectedFilePaths);
 
     /// <summary>
     /// Addresses to put in <c>FileEngineSettings.DelegatedUserEmail</c>, one leg each, separated by
@@ -133,7 +154,7 @@ public sealed class ProbeOptions
 
     /// <summary>The addresses, split and trimmed.</summary>
     public IReadOnlyList<string> DelegatedUsers =>
-        DelegatedUserEmails.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Several(DelegatedUserEmails);
 
     /// <summary>
     /// Holds <c>FileEngineSettings.Identity</c> still while <c>DelegatedUserEmail</c> varies.
