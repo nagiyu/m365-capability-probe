@@ -314,27 +314,19 @@ public sealed class InventoryReach(
     /// <summary>
     /// What an empty sharing-link group does and does not mean.
     /// <para>
-    /// SharePoint names these groups after the link they back, and the name carries the link's
-    /// audience: <c>SharingLinks.&lt;item&gt;.OrganizationEdit.&lt;link&gt;</c>. A link aimed at the
-    /// whole organisation has nobody to list, so an empty group here is normal - and reading it as
-    /// "nobody can open this" would be backwards. The audience is quoted from the name rather than
-    /// interpreted, because what each audience actually permits has not been measured here.
+    /// An empty group here is not "nobody can open this" - a link aimed at an audience rather than at
+    /// named people has nobody to list. But which audience is not this function's to say. The earlier
+    /// version read it out of the group's name, which is undocumented, and stated it as fact; the
+    /// audience now comes from Graph and lives in its own table, so this points there rather than
+    /// answering. Naming the link is what makes the two tables joinable by eye.
     /// </para>
     /// </summary>
-    private static string LinkCaveat(string title)
-    {
-        if (!title.StartsWith("SharingLinks.", StringComparison.OrdinalIgnoreCase))
-        {
-            return string.Empty;
-        }
-
-        var parts = title.Split('.');
-        var audience = parts.Length > 2 ? parts[2] : "(not named)";
-
-        return $" - this backs a sharing link whose audience the name gives as '{audience}'. " +
-               "An empty membership does not mean nobody can open the file: a link aimed at an " +
-               "audience rather than at named people grants reach without listing anyone here";
-    }
+    private static string LinkCaveat(string title) =>
+        title.StartsWith("SharingLinks.", StringComparison.OrdinalIgnoreCase)
+            ? " - this backs a sharing link, and an empty membership does not mean nobody can open " +
+              "the file. What the link reaches is in the links table, which Graph answered; this " +
+              "group's membership does not describe it"
+            : string.Empty;
 
     /// <summary>
     /// A directory group's members, through Graph's <c>transitiveMembers</c> cast to users. The cast

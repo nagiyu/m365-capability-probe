@@ -193,6 +193,9 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 
         report.Subject["listing ended"] = ending;
 
+        console.WriteLine($"Asking Graph what links are on {items.Count(i => !i.IsFolder)} files...");
+        var links = await LinksAsync(caller, siteId, items, token.AccessToken, calls, cancellationToken);
+
         // Asked for once and carried through both sections. Section C needs the same token to read a
         // SharePoint group's members, and a second acquisition would make a run where the two halves
         // disagreed impossible to tell apart from a run where the token changed underneath them.
@@ -210,6 +213,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         report.Subject["throttling"] = caller.Record.Summary;
 
         report.Add(BuildFileTable(items));
+        report.Add(BuildLinkTable(links));
         report.Add(BuildSharingTable(sharing));
         report.Add(BuildReachTable(reach));
         report.Add(BuildGapTable(reach));
@@ -221,6 +225,7 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         report.Add(SharingObservation(sharing));
+        report.Add(LinkObservation(links));
         report.Add(ReachObservation(reach, sharing));
         report.Add(CoverageObservation(items, sharing, reach, caller.Record, ending));
         report.Finish();
@@ -324,6 +329,51 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
         item.Basis = chain.Any(c => UndecryptableCodes.Contains(c))
             ? Basis.Undecryptable
             : Basis.Unresolved;
+    }
+
+    /// <summary>Every link on every file, and the files whose links could not be read.</summary>
+    private sealed record Links(IReadOnlyList<InventoryLinks.Link> Found, IReadOnlyList<string> Unread, int Asked);
+
+    /// <summary>
+    /// One call per file. This is the expensive shape the rest of the subcommand avoids, and it is
+    /// spent deliberately: the alternative was reading a link's audience out of the name SharePoint
+    /// gives its backing group, which is undocumented, and which run 73 had this tool asserting from.
+    /// <para>
+    /// Folders are skipped. They can carry links too - but section A lists the root's children, so a
+    /// folder here is a container this run did not walk into, and a link on it would be reported
+    /// against a name whose contents are not in the report.
+    /// </para>
+    /// </summary>
+    private async Task<Links> LinksAsync(
+        ThrottleAwareCaller caller,
+        string siteId,
+        IReadOnlyList<Item> items,
+        string token,
+        List<HttpObservation> calls,
+        CancellationToken cancellationToken)
+    {
+        var found = new List<InventoryLinks.Link>();
+        var unread = new List<string>();
+        var asked = 0;
+
+        foreach (var item in items.Where(i => !i.IsFolder))
+        {
+            asked++;
+            var url = $"{GraphBase}/sites/{siteId}/drive/items/{item.Id}/permissions";
+            var observation = await caller.GetAsync(url, token, cancellationToken);
+            calls.Add(observation);
+
+            var links = InventoryLinks.Read(observation, item.Name);
+            if (links is null)
+            {
+                unread.Add($"{item.Name} ({Describe(observation)})");
+                continue;
+            }
+
+            found.AddRange(links);
+        }
+
+        return new Links(found, unread, asked);
     }
 
     /// <summary>
@@ -652,6 +702,43 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
     }
 
     /// <summary>
+    /// Every link, with the audience Graph gave it. <c>adds reach</c> is the column that matters: a
+    /// link scoped to people who could already open the item creates a backing group like any other
+    /// and grants nothing, and section C must not credit it with an audience.
+    /// </summary>
+    private static ProbeTable BuildLinkTable(Links links)
+    {
+        var rows = links.Found
+            .Select(l => (IReadOnlyList<string?>)new[]
+            {
+                l.FileName,
+                l.Scope ?? "(none)",
+                l.Type ?? "(none)",
+                InventoryLinks.AddsReach(l.Scope) switch { true => "yes", false => "no", null => "unknown" },
+                InventoryLinks.Audience(l),
+                string.Join(", ", new[]
+                {
+                    l.Roles.Count > 0 ? string.Join("+", l.Roles) : null,
+                    l.PreventsDownload == true ? "no download" : null,
+                    l.HasPassword ? "password" : null,
+                    l.Expires is not null ? $"expires {l.Expires}" : null,
+                }.Where(s => s is not null)),
+                l.PermissionId,
+            })
+            .ToList();
+
+        foreach (var name in links.Unread)
+        {
+            rows.Add(["(not read)", "-", "-", "unknown", name, "-", "-"]);
+        }
+
+        return new ProbeTable(
+            $"Sharing links on each file, as Graph reports them ({links.Asked} files asked)",
+            ["file", "scope", "type", "adds reach", "who that reaches", "other", "permission id"],
+            rows.Count == 0 ? [["(no links on any file)", "-", "-", "-", "-", "-", "-"]] : rows);
+    }
+
+    /// <summary>
     /// The table the whole subcommand was asked for: the people, per file. It is printed next to the
     /// gap table on purpose - this one alone would read as a complete answer, and it is only ever as
     /// complete as the one after it says.
@@ -749,6 +836,39 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["ending"] = sharing.Ending,
                 ["note"] = "this section walks the whole list; section A walks the root folder's " +
                            "children. Two different counts are a difference of range, not a disagreement",
+            },
+        };
+    }
+
+    private static Observation LinkObservation(Links links)
+    {
+        var scopes = links.Found
+            .GroupBy(l => l.Scope ?? "(none)", StringComparer.OrdinalIgnoreCase)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => $"{g.Key} x{g.Count()}")
+            .ToList();
+
+        var noReach = links.Found.Count(l => InventoryLinks.AddsReach(l.Scope) == false);
+        var unknown = links.Found.Count(l => InventoryLinks.AddsReach(l.Scope) is null);
+
+        return Observation.Measured(
+            "what the sharing links reach",
+            $"{links.Found.Count} links on {links.Asked} files" +
+            (scopes.Count == 0 ? "" : $" - {string.Join(", ", scopes)}") +
+            $"; {noReach} grant nobody new, {unknown} of unknown scope" +
+            (links.Unread.Count == 0 ? "" : $"; {links.Unread.Count} files' permissions were not read")) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["links"] = links.Found.Count.ToString(),
+                ["filesAsked"] = links.Asked.ToString(),
+                ["filesUnread"] = links.Unread.Count.ToString(),
+                ["scopes"] = string.Join(", ", scopes),
+                ["grantNobodyNew"] = noReach.ToString(),
+                ["unknownScope"] = unknown.ToString(),
+                ["note"] = "scope and type are quoted from Graph, not read out of the name SharePoint " +
+                           "gives the link's backing group - that naming is undocumented, and section C " +
+                           "used to assert an audience from it",
             },
         };
     }
