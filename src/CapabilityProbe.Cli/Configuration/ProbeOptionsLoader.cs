@@ -20,13 +20,14 @@ public static class ProbeOptionsLoader
     public const string AclCommand = "acl";
     public const string MipCommand = "mip";
     public const string ConsumeCommand = "consume";
+    public const string InventoryCommand = "inventory";
 
     public static readonly string[] AllCommands =
-        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand];
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand, InventoryCommand];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
     private static readonly string[] NeedsApp =
-        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand];
+        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
 
@@ -40,6 +41,14 @@ public static class ProbeOptionsLoader
     /// </summary>
     private static readonly string[] NeedsTenant =
         [AuthCommand, AccessCommand, SharePointCommand, AclCommand];
+
+    /// <summary>
+    /// <c>inventory</c> needs a site and an identity, but not the probe's own secret: it prefers a
+    /// certificate, and may be pointed at a second app registration entirely. Its requirements are
+    /// listed separately so a run that has everything <c>inventory</c> wants is not blocked by a gap
+    /// that only matters to the subcommands measuring the probe's own registration.
+    /// </summary>
+    private static readonly string[] InventoryOnly = [InventoryCommand];
 
     private static readonly string[] AccessOnly = [AccessCommand];
 
@@ -137,9 +146,24 @@ public static class ProbeOptionsLoader
                 "neither is set, and 'consume' needs one of them to authenticate as the app",
                 ConsumeOnly));
         }
+        // inventory can speak as either registration, so what it needs is "one of them can prove
+        // itself" rather than any particular key. Naming both is what makes the message actionable.
+        var inventoryApp = options.InventoryApp;
+        if (inventoryApp.IsEmpty ||
+            (!inventoryApp.HasCertificate && string.IsNullOrWhiteSpace(inventoryApp.ClientSecret)))
+        {
+            problems.Add(new ConfigurationProblem(
+                "InventoryClientId / ClientId",
+                "'inventory' found no app registration it can prove: set InventoryClientId with " +
+                "InventoryCertificatePath, or leave them empty to fall back to the probe's own registration",
+                InventoryOnly));
+        }
+
         // consume normally needs no site at all. It does once its file is named as living in one, and
         // then a missing SiteUrl stops it just as surely as it stops the others.
-        string[] siteUrlBlocks = hasSiteFile ? [.. NeedsTenant, ConsumeCommand] : NeedsTenant;
+        string[] siteUrlBlocks = hasSiteFile
+            ? [.. NeedsTenant, ConsumeCommand, InventoryCommand]
+            : [.. NeedsTenant, InventoryCommand];
 
         Require(problems, "SiteUrl", options.SiteUrl, siteUrlBlocks,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");

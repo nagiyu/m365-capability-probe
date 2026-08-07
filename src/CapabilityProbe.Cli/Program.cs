@@ -64,6 +64,9 @@ public static class Program
                 ProbeOptionsLoader.ConsumeCommand =>
                     await RunConsumeAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.InventoryCommand =>
+                    await RunInventoryAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -105,6 +108,12 @@ public static class Program
         return await new ConsumeProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunInventoryAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new InventoryProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -137,6 +146,11 @@ public static class Program
         writer.WriteLine("              configuration and no tenant - it asks about this machine, not about M365");
         writer.WriteLine("  consume     open each protected file once per DelegatedUserEmail, plus once with the");
         writer.WriteLine("              value unset, and report what licence the protection service issued");
+        writer.WriteLine("  inventory   every file in a site: what it is called, whether it is protected, who it");
+        writer.WriteLine("              is shared with, and who can actually open it. the one subcommand meant to");
+        writer.WriteLine("              be used rather than only read - it honours Retry-After, it never prints a");
+        writer.WriteLine("              protection value it did not establish, and whatever it could not resolve");
+        writer.WriteLine("              gets a row of its own saying why");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

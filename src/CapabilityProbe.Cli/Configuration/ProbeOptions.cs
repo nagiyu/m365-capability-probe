@@ -183,6 +183,49 @@ public sealed class ProbeOptions
     public int PagesToFollow =>
         int.TryParse(PageLimit.Trim(), out var value) && value > 0 ? value : DefaultPageLimit;
 
+    /// <summary>
+    /// Application (client) ID of a <em>second</em> app registration, used only by <c>inventory</c>.
+    /// <para>
+    /// Empty, <c>inventory</c> falls back to the probe's own registration and reports that it did.
+    /// That is not a degraded mode to be hidden - running the same inventory from a weak registration
+    /// and a strong one, and reading where the blanks move, is the measurement this whole tool is
+    /// about. The report says which registration answered.
+    /// </para>
+    /// </summary>
+    public string InventoryClientId { get; set; } = string.Empty;
+
+    /// <summary>Path to the second registration's <c>.pfx</c>.</summary>
+    public string InventoryCertificatePath { get; set; } = string.Empty;
+
+    /// <summary>Password for <see cref="InventoryCertificatePath"/>, if it has one.</summary>
+    public string InventoryCertificatePassword { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Client secret for the second registration. Present for completeness and expected to stay empty:
+    /// the one route <c>inventory</c> cannot do without - SharePoint REST - refuses secrets outright
+    /// (finding 5, and Microsoft's own statement that every option other than a certificate is blocked).
+    /// A secret here would buy nothing and would put a broadly-permissioned credential in CI.
+    /// </summary>
+    public string InventoryClientSecret { get; set; } = string.Empty;
+
+    /// <summary>The app registration every subcommand except <c>inventory</c> speaks as.</summary>
+    public AppCredentials ProbeApp => new(
+        TenantId, ClientId, ClientSecret, ClientCertificatePath, ClientCertificatePassword,
+        "the probe's own app registration");
+
+    /// <summary>
+    /// The registration <c>inventory</c> speaks as: its own when configured, the probe's otherwise.
+    /// The label travels with it so the report can say which one answered rather than leaving a reader
+    /// to infer it from which columns came back empty.
+    /// </summary>
+    public AppCredentials InventoryApp =>
+        string.IsNullOrWhiteSpace(InventoryClientId)
+            ? ProbeApp with { Label = "the probe's app registration (InventoryClientId is not set)" }
+            : new AppCredentials(
+                TenantId, InventoryClientId, InventoryClientSecret,
+                InventoryCertificatePath, InventoryCertificatePassword,
+                "the inventory app registration");
+
     /// <summary>Host name taken from <see cref="SiteUrl"/>. Used to build the SharePoint scope.</summary>
     public string SiteHost =>
         Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;

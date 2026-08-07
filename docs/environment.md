@@ -164,7 +164,12 @@
 
 ## Entra: アプリ登録
 
-アプリ登録は 1 つ。管理者の同意を与えたのは、正確に次のものだけです。
+**アプリ登録は 2 つです。**
+
+### 1. `capability-probe` ― 測定用（凍結）
+
+**所見 1〜14 はすべてこの登録の測定です。** 比較の基準線なので、**もう変えません。**
+管理者の同意を与えたのは、正確に次のものだけです。
 
 | API | アクセス許可 | 種類 | 管理者の同意 |
 | --- | --- | --- | --- |
@@ -190,6 +195,32 @@
 測定結果は読めます。
 
 Microsoft Graph 側は初版から一度も変えていません ― **対照として固定してあります**。
+
+### 2. `capability-inventory` ― `inventory` 用（2026-08-06 に発行）
+
+**`inventory` だけがこの登録を名乗ります。** `capability-probe` を凍結したまま強い付与を試せる
+ように分けました ― **弱い登録と強い登録で同じサイトを並べ、空欄がどこに移るかを見ること自体が
+測定**なので (実行 #70 と #71 がその 1 組です)。
+
+| API | アクセス許可 | 種類 | 管理者の同意 |
+| --- | --- | --- | --- |
+| Microsoft Graph | `Sites.Read.All` | アプリケーション | 済 |
+| Microsoft Graph | `GroupMember.Read.All` | アプリケーション | 済 |
+| Microsoft Graph | `User.ReadBasic.All` | アプリケーション | 済 |
+| SharePoint | **`Sites.FullControl.All`** | アプリケーション | 済 |
+
+**シークレットはありません。証明書だけ**です (`CN=capability-inventory`、拇印
+`D5DD64E7C70691EF85AD82811ADEDA819825F2B0`、2027-08-06 まで)。所見 5 の裏付けのとおり、
+**Entra の app-only が SharePoint REST に通るには証明書が必須**なので、シークレットを置いても
+B 節は動きません。
+
+`InformationProtectionPolicy.Read.All` の類は**足していません** ― 実行 #70 で
+`extractSensitivityLabels` が `Sites.Read.All` だけで `200` を返しているので、不要と実測できています。
+
+**この登録は `Sites.FullControl.All` を持ったままです。** `capability-probe` 側の方針
+（測り終えたら戻す）とは違いますが、**`inventory` はその付与が前提の道具**なので残します。
+テナント内の全サイト コレクションに対するフル コントロールが、**証明書つきで CI にある**という
+ことです。
 
 **意図的に付与していないもの** ― これらの欠落が測定対象です。
 
@@ -427,6 +458,7 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 6 追試 1・2. アプリの identity でも 403、ただし FullControl で 200 / 0 件 | 対象が `Limited Access System Group For List …` ― **所見 4 のための継承切断で生まれたとみられるグループ**で、`閲覧者` グループではありません |
 | 6 追試 3・4. 答えは 3 つと 3 つに割れる | サイトのグループが 6 つあり、うち 3 つが自動生成とみられるものであること / 管理者が作った 3 つに人が 0〜1 人ずついること |
 | 10 の訂正. ポリシーの一覧は `Custom` の所有者にしか返らない | **`TemplateBased` と `Custom` の 2 枚が同じ実行に並んでいる**こと / **リンが 2 枚とも所有者**であること (所有者を固定して保護の形だけを動かせる) / ミクが `VIEWRIGHTSDATA` を持っていること |
+| 14. Graph は読めないファイルを `false` と言う | **3 枚が暗号化されていることを別経路で測ってある**こと (所見 9〜12) / **ラベルの無い `test.docx` が同じ実行に並んでいる**こと (これが無いと `false` の意味が割れません) / **`EnableAIPIntegration` が `True`** であること (無効なら設定の話で終わっていました) |
 | 8 の追試 2. サービスも切る / `429` | **ライブラリが 257 件あること** (200 を越えないと Graph の既定ページが見えません) / **`$top` を渡さないこと** / **前・上げ・戻しの 3 回を測ったこと** (これが無いと `429` を権限のせいにしていました) |
 | 8 の追試 1. 束取りはページを追う | **`$top=2` を渡せること** (7 件のライブラリでページを割るため) / **SharePoint 付与を `FullControl.All` に上げたこと** (C が通らないとページを追う機会がありません) / **証明書があること** / **前と戻しの両方を測ったこと** |
 | 13. 循環は作れる / 輪は畳まれる / `null` は伏せ字 | **`probe-cycle-a` と `probe-cycle-b` が互いのメンバー**であること / **`probe-cycle-b` にミクが直接いる**こと (人がいないと空との区別がつきません) / **Graph Explorer から人がサインインして測った**こと ― プローブのアプリには何も足していません |
@@ -481,9 +513,17 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 2026-08-05 | **SharePoint のアプリケーション付与を `Sites.FullControl.All` に差し替え** (`Sites.Read.All` は削除)。**Graph と Azure RMS は無変更。** 前後に `auth` (#57 / #58) を回し、**動いたのが SharePoint の 1 行だけ**であることを確認。`acl` (#59) で **C が `200` / 5 呼び出し / 4 ページ / 8 件** ― **束取りの経路もページを追います** (所見 8 の追試 1) |
 | 2026-08-05 | **`Sites.Read.All` に戻した** (`Sites.FullControl.All` は削除)。`auth` (#60) が **#57 と一致**、`acl` (#61) が **#56 と一致**。**戻ったことも測定です** |
 | 2026-08-05 | **ライブラリに `probe-bulk-001.txt` 〜 `probe-bulk-250.txt` の 250 枚を追加** (Graph PowerShell から、中身はただのテキスト)。**A〜G と合わせて 257 件。** `acl` を `$top` 無しで 3 回 ― `Read.All` (#63) / `FullControl.All` (#65) / 戻し (#66)。**Graph の `/children` は 200 件で自分から切り**、**#65 では `429` が出て ACL が 34 件欠けました**。**#63 と #66 が完全一致**したので、欠けは権限ではなく負荷です (所見 8 の追試 2) |
+| 2026-08-06 | **テナントは無変更**（`Get-SPOTenant` の読み取りと Graph の GET / `extractSensitivityLabels` の POST のみ）。**`EnableAIPIntegration` は `True`**。それでも `_IpLabelId` / `_EffectiveIpLabelId` / `sensitivityLabel` はすべて空で、**`MetaInfo` にだけラベルが載っています**。`extractSensitivityLabels` は保護 3 枚に **`415` / `fileDecryptionNotSupported` / `unsupportedUser`**、`test.docx` に **`200` `{"labels":[]}`** (所見 14) |
+| 2026-08-06 | **Graph PowerShell に `Sites.Read.All` (委任) を追加同意。** 同意先は Microsoft の「Microsoft Graph Command Line Tools」で、**このプローブのアプリ登録は無変更**です |
+| 2026-08-06 | **SPO 管理シェル (`Microsoft.Online.SharePoint.PowerShell`) を導入し、`Get-SPOTenant` を読み取り。** 書き込みは 1 つもしていません |
 | 2026-08-05 | **250 枚を削除**し、`acl` (#67) が **#55 と完全一致**することを確認 ― 7 件 / 29 エントリ / 8 呼び出し / **1 ページ**。**ページ数が 2 から 1 に戻った**ことが、ページ数を決めていたのが件数だったことを示しています。**ライブラリは元通り**です |
 | 2026-08-05 | **Graph PowerShell (`Microsoft.Graph.Authentication`) に `Files.ReadWrite.All` (委任) を管理者同意。** 同意先は **Microsoft の「Microsoft Graph Command Line Tools」**で、**このプローブのアプリ登録は無変更**です。250 枚を置くためだけに使いました |
 | 2026-08-05 | **セキュリティ グループを 2 つ作成** (`probe-cycle-a` / `probe-cycle-b`) し、**互いを相手のメンバーに**して循環させ、`probe-cycle-b` にミクを直接追加。**ポータルは止めませんでした** (所見 13)。SharePoint のサイトにも秘密度ラベルにも紐付いていません |
 | 2026-08-05 | **Graph Explorer に `GroupMember.Read.All` と `User.Read.All` (いずれも委任) を管理者同意。** 同意先は **Microsoft の Graph Explorer アプリ**で、**このプローブのアプリ登録は無変更**です ― `auth` の出力は動きません。`transitiveMembers` を 7 本測定 (所見 13)。**`User.Read.All` を足す前後で、同じ URL の `displayName` が `null` → `ミク` に変わりました** |
 | 2026-08-05 | **すべて戻した** ― `Remove-AipServiceSuperUser`、`Disable-AipServiceSuperUserFeature`、Entra から `Content.SuperUser` を削除。`auth` (#52) と `consume` (#53) が **#45 / #46 と一致**することを確認。**戻ったことも測定です** |
 | 2026-08-05 | **#43 の入力に打ち間違いがありました** (`miku@nagiyu3.onmicrosoft` ― `.com` 抜け)。返ったのは `ServiceDisabledException` (「このテナントでは RMS が無効」) で、**ドメイン部でテナントが選ばれている**ことが分かりました。#44 で `.com` を足すと同じ行が `NoPermissionsException` になり、**原因が入力側だと確定**しています |
+| 2026-08-06 | **Entra に 2 つ目のアプリ登録 `capability-inventory` を発行**（証明書のみ、シークレットなし）。Graph `Sites.Read.All` / `GroupMember.Read.All` / `User.ReadBasic.All`、SharePoint **`Sites.FullControl.All`**。**`capability-probe` は無変更で凍結。** 実行 #70（弱い登録）で B 節が `403`、#71（新登録）で `200` ― **動いたのは SharePoint の 1 本だけ**です |
+| 2026-08-06 | **`inventory` の一連（#68〜#73）。テナントは無変更。** 所見 15（`制限付きアクセス` が到達範囲を 5 倍に見せる）が出ました。**サイトの `probe メンバー` グループが空**であることも判明 ― `編集` を持つのに誰も入っていないので、C 節はその役割から 1 人も出しません |
+| 2026-08-07 | **ライブラリに 5 枚追加**（`e-link-view.docx` / `f-link-people.docx` / `g-link-existing.docx` と、`restricted/deeper/h-deep.docx` / `restricted/test.docx`）。**`restricted/deeper` フォルダを新規作成。** `restricted/test.docx` は**ルートの `test.docx` と同名**で、結合が名前ではなく ID で行われていることの試験材料です。**8 → 14 アイテム。** リンクを 2 本作ったので**サイト グループも 2 つ増えました**（`sitegroups(15)` / `(17)`）― 測定が環境を変えています |
+| 2026-08-07 | **外部共有は無効のまま**です。「リンクを知っている全員」が共有ダイアログに出ないことを画面で確認しました ― **匿名リンクは作れず、`anonymous` の対象範囲は未観測**です。設定は変更していません |
+| 2026-08-07 | **実行 #74。** 再帰と結合が通り、**14 アイテムが `listItemId` で 14/14 一致**。所見 16（グループ名の `Flexible` と Graph の `users` が対応しない）と所見 17（`existingAccess` のリンクはどこにも痕跡を残さない）が出ました |

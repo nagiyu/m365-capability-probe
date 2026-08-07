@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace CapabilityProbe.Http;
@@ -216,6 +217,74 @@ public sealed class ProbeHttpClient : IDisposable
             stopwatch.Stop();
             return new HttpObservation(
                 Method: "GET",
+                Url: url,
+                RequestHeaders: recordedHeaders,
+                StatusCode: null,
+                ReasonPhrase: null,
+                Body: string.Empty,
+                ElapsedMs: stopwatch.ElapsedMilliseconds,
+                TransportError: $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// A POST, recorded exactly like a GET. Added for the one call that asks a service to do something
+    /// and answers with a refusal that is itself the measurement: <c>extractSensitivityLabels</c> says
+    /// nothing about encryption when it succeeds, and names a documented reason when it cannot decrypt.
+    /// <para>
+    /// It sends no body by default, which is what that endpoint wants. A body is accepted for callers
+    /// that need one, and is recorded in the request headers as a length rather than as content.
+    /// </para>
+    /// </summary>
+    public async Task<HttpObservation> PostAsync(
+        string url,
+        string accessToken,
+        CancellationToken cancellationToken,
+        string? body = null,
+        string accept = "application/json")
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        request.Headers.Accept.Add(MediaTypeWithQualityHeaderValue.Parse(accept));
+
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        }
+
+        var recordedHeaders = new[]
+        {
+            $"Authorization: Bearer <{accessToken.Length} chars, redacted>",
+            $"Accept: {accept}",
+            body is null ? "(no request body)" : $"Content-Type: application/json, {body.Length} chars",
+        };
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken);
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            stopwatch.Stop();
+
+            return new HttpObservation(
+                Method: "POST",
+                Url: url,
+                RequestHeaders: recordedHeaders,
+                StatusCode: (int)response.StatusCode,
+                ReasonPhrase: response.ReasonPhrase ?? ((HttpStatusCode)response.StatusCode).ToString(),
+                Body: text.Length <= MaxBodyLength ? text : text[..MaxBodyLength],
+                ElapsedMs: stopwatch.ElapsedMilliseconds,
+                TransportError: null)
+            {
+                ResponseHeaders = CollectHeaders(response),
+                BodyTruncated = text.Length > MaxBodyLength,
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            stopwatch.Stop();
+            return new HttpObservation(
+                Method: "POST",
                 Url: url,
                 RequestHeaders: recordedHeaders,
                 StatusCode: null,
