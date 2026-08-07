@@ -764,18 +764,26 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
 
         var notCounted = reach.Gaps.Count(g => g.Why.StartsWith("not counted", StringComparison.Ordinal));
 
+        // Four numbers, not two. "Expanded" and "named somebody" were the same number until run 72,
+        // where two groups were read successfully, contained nobody, and were counted as expanded -
+        // so the line said nothing was missing while the table named nobody for a role that grants
+        // access. Empty and refused are different findings and neither is a success.
         return Observation.Measured(
             "who can open each file",
             $"{reach.DistinctPeople} distinct people across {reach.Rows.Count} file/person pairs; " +
-            $"{reach.PrincipalsResolved} principals expanded, {reach.PrincipalsUnresolved} could not be; " +
+            $"principals: {reach.PrincipalsResolved} named people, {reach.PrincipalsEmpty} were empty, " +
+            $"{reach.PrincipalsUnresolved} could not be read, " +
+            $"{reach.PrincipalsNotApplicable} had no membership to read; " +
             $"{notCounted} grants not counted as reach") with
         {
             Details = new Dictionary<string, string?>
             {
                 ["people"] = reach.DistinctPeople.ToString(),
                 ["pairs"] = reach.Rows.Count.ToString(),
-                ["principalsResolved"] = reach.PrincipalsResolved.ToString(),
-                ["principalsUnresolved"] = reach.PrincipalsUnresolved.ToString(),
+                ["principalsNamedPeople"] = reach.PrincipalsResolved.ToString(),
+                ["principalsEmpty"] = reach.PrincipalsEmpty.ToString(),
+                ["principalsUnreadable"] = reach.PrincipalsUnresolved.ToString(),
+                ["principalsWithNoMembership"] = reach.PrincipalsNotApplicable.ToString(),
                 ["grantsNotCountedAsReach"] = notCounted.ToString(),
                 ["note"] = "a grant carrying only Limited Access is not reach: SharePoint adds it to the " +
                            "parent list whenever somebody is given one item inside, so counting it would " +
@@ -806,12 +814,16 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                        reach.PrincipalsUnresolved == 0 &&
                        ending.Contains("ended", StringComparison.Ordinal);
 
+        // An empty group does not make the report incomplete - nothing was withheld - but it does make
+        // "who can open this" narrower than a reader would assume, so the count travels either way.
+        var empties = reach.PrincipalsEmpty > 0 ? $"; {reach.PrincipalsEmpty} principals named nobody" : "";
+
         var observed = complete
-            ? $"{files} files, all resolved; sharing read; every principal expanded; " +
+            ? $"{files} files, all resolved; sharing read; every principal read{empties}; " +
               $"the walk {ending}; {throttling.Summary}"
             : $"{files} files, {unknown} unresolved; " +
               (sharing.Refusal is null ? "sharing read" : "sharing NOT read") +
-              $"; {reach.PrincipalsUnresolved} principals NOT expanded" +
+              $"; {reach.PrincipalsUnresolved} principals NOT read{empties}" +
               $"; the walk {ending}; {throttling.Summary}";
 
         return Observation.Measured("is this inventory complete", observed) with
@@ -823,7 +835,8 @@ public sealed class InventoryProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["listingEnded"] = ending,
                 ["sharingEnded"] = sharing.Ending,
                 ["sharingRefusal"] = sharing.Refusal,
-                ["principalsUnresolved"] = reach.PrincipalsUnresolved.ToString(),
+                ["principalsUnreadable"] = reach.PrincipalsUnresolved.ToString(),
+                ["principalsEmpty"] = reach.PrincipalsEmpty.ToString(),
                 ["peopleNamed"] = reach.DistinctPeople.ToString(),
                 ["throttledCalls"] = throttling.Throttled.ToString(),
                 ["gaveUp"] = throttling.GaveUp.ToString(),

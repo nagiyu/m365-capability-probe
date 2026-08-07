@@ -37,8 +37,32 @@ public sealed class InventoryReach(
         public string Key => Upn ?? Display;
     }
 
+    /// <summary>
+    /// How a principal turned out, kept apart from how many people it produced.
+    /// <para>
+    /// Run 72 is why this exists. Two groups were read successfully and contained nobody, and because
+    /// nothing had gone wrong the report counted them as expanded and said "0 principals NOT expanded"
+    /// while quietly naming no one for a role that plainly grants access. Finding 6 is the same shape:
+    /// a count of zero, about an object the reader cannot tell was even asked about.
+    /// </para>
+    /// </summary>
+    private enum Outcome
+    {
+        /// <summary>Read, and it named people.</summary>
+        People,
+
+        /// <summary>Read, and it named nobody. A fact about the group, and it must be printed.</summary>
+        Empty,
+
+        /// <summary>Not read. Whatever it contains is missing from the report.</summary>
+        Refused,
+
+        /// <summary>There was never a membership to read - a claim standing for a population.</summary>
+        NotApplicable,
+    }
+
     /// <summary>What one principal turned out to contain, or why it did not.</summary>
-    private sealed record Resolution(IReadOnlyList<Person> People, string? Gap);
+    private sealed record Resolution(IReadOnlyList<Person> People, string? Gap, Outcome Outcome);
 
     /// <summary>One (file, person) pair, with every route that put them there.</summary>
     public sealed record Row(string Item, string Person, string Via, string Roles);
@@ -51,7 +75,9 @@ public sealed class InventoryReach(
         IReadOnlyList<Gap> Gaps,
         int DistinctPeople,
         int PrincipalsResolved,
-        int PrincipalsUnresolved);
+        int PrincipalsEmpty,
+        int PrincipalsUnresolved,
+        int PrincipalsNotApplicable);
 
     /// <summary>
     /// Resolved principals, so a group named on eight items costs one call. Keyed on the login name
@@ -120,8 +146,10 @@ public sealed class InventoryReach(
             rows,
             gaps,
             rows.Select(r => r.Person).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
-            _cache.Values.Count(r => r.Gap is null),
-            _cache.Values.Count(r => r.Gap is not null));
+            _cache.Values.Count(r => r.Outcome == Outcome.People),
+            _cache.Values.Count(r => r.Outcome == Outcome.Empty),
+            _cache.Values.Count(r => r.Outcome == Outcome.Refused),
+            _cache.Values.Count(r => r.Outcome == Outcome.NotApplicable));
     }
 
     private async Task<Resolution> ResolveOnceAsync(
@@ -155,21 +183,26 @@ public sealed class InventoryReach(
         // question does not apply.
         if (login.Contains("spo-grid-all-users", StringComparison.OrdinalIgnoreCase))
         {
-            return new Resolution([], "every internal user in the tenant - a claim with no membership to enumerate");
+            return new Resolution([],
+                "every internal user in the tenant - a claim with no membership to enumerate",
+                Outcome.NotApplicable);
         }
 
         if (login.StartsWith("c:0(.s|true", StringComparison.OrdinalIgnoreCase))
         {
-            return new Resolution([], "everyone, including anonymous - a claim with no membership to enumerate");
+            return new Resolution([],
+                "everyone, including anonymous - a claim with no membership to enumerate",
+                Outcome.NotApplicable);
         }
 
         return grant.PrincipalType switch
         {
-            1 => new Resolution([new Person(grant.PrincipalTitle, UpnFrom(login))], null),
+            1 => new Resolution([new Person(grant.PrincipalTitle, UpnFrom(login))], null, Outcome.People),
             8 => await SharePointGroupAsync(grant, graphToken, sharePointToken, cancellationToken),
             2 or 4 => await DirectoryGroupAsync(grant, graphToken, cancellationToken),
             _ => new Resolution([],
-                $"principal type {grant.PrincipalType?.ToString() ?? "(absent)"} - nothing here knows how to expand it"),
+                $"principal type {grant.PrincipalType?.ToString() ?? "(absent)"} - nothing here knows how to expand it",
+                Outcome.Refused),
         };
     }
 
@@ -185,12 +218,13 @@ public sealed class InventoryReach(
     {
         if (sharePointToken is null)
         {
-            return new Resolution([], "no SharePoint token, so its members were never asked for");
+            return new Resolution([], "no SharePoint token, so its members were never asked for", Outcome.Refused);
         }
 
         if (grant.PrincipalId is null)
         {
-            return new Resolution([], "the group arrived with no Id, so there was nothing to ask about");
+            return new Resolution([],
+                "the group arrived with no Id, so there was nothing to ask about", Outcome.Refused);
         }
 
         var url = $"{siteUrl.TrimEnd('/')}/_api/web/sitegroups({grant.PrincipalId})/users";
@@ -201,7 +235,7 @@ public sealed class InventoryReach(
         if (root is null || !root.Value.TryGetProperty("value", out var value) ||
             value.ValueKind != JsonValueKind.Array)
         {
-            return new Resolution([], $"its members could not be read ({Describe(observation)})");
+            return new Resolution([], $"its members could not be read ({Describe(observation)})", Outcome.Refused);
         }
 
         var people = new List<Person>();
@@ -239,7 +273,44 @@ public sealed class InventoryReach(
             }
         }
 
-        return new Resolution(people, nested.Count == 0 ? null : string.Join("; ", nested));
+        if (people.Count > 0)
+        {
+            return new Resolution(people, nested.Count == 0 ? null : string.Join("; ", nested), Outcome.People);
+        }
+
+        // Read, and nobody in it. Run 72 printed this as success and named no one, which is the exact
+        // failure finding 6 recorded: a zero that reads like an answer. It is a fact about the group
+        // and it gets a row.
+        var empty = nested.Count > 0
+            ? $"the group was read; nothing in it resolved to a person ({string.Join("; ", nested)})"
+            : "the group was read and has no members";
+
+        return new Resolution([], $"{empty}{LinkCaveat(grant.PrincipalTitle)}", Outcome.Empty);
+    }
+
+    /// <summary>
+    /// What an empty sharing-link group does and does not mean.
+    /// <para>
+    /// SharePoint names these groups after the link they back, and the name carries the link's
+    /// audience: <c>SharingLinks.&lt;item&gt;.OrganizationEdit.&lt;link&gt;</c>. A link aimed at the
+    /// whole organisation has nobody to list, so an empty group here is normal - and reading it as
+    /// "nobody can open this" would be backwards. The audience is quoted from the name rather than
+    /// interpreted, because what each audience actually permits has not been measured here.
+    /// </para>
+    /// </summary>
+    private static string LinkCaveat(string title)
+    {
+        if (!title.StartsWith("SharingLinks.", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        var parts = title.Split('.');
+        var audience = parts.Length > 2 ? parts[2] : "(not named)";
+
+        return $" - this backs a sharing link whose audience the name gives as '{audience}'. " +
+               "An empty membership does not mean nobody can open the file: a link aimed at an " +
+               "audience rather than at named people grants reach without listing anyone here";
     }
 
     /// <summary>
@@ -254,7 +325,8 @@ public sealed class InventoryReach(
         if (objectId is null)
         {
             return new Resolution([],
-                $"no directory object id could be read out of its login name ({grant.LoginName ?? "absent"})");
+                $"no directory object id could be read out of its login name ({grant.LoginName ?? "absent"})",
+                Outcome.Refused);
         }
 
         var people = new List<Person>();
@@ -272,7 +344,8 @@ public sealed class InventoryReach(
             if (root is null || !root.Value.TryGetProperty("value", out var value) ||
                 value.ValueKind != JsonValueKind.Array)
             {
-                return new Resolution(people, $"its members could not be read ({Describe(observation)})");
+                return new Resolution(
+                    people, $"its members could not be read ({Describe(observation)})", Outcome.Refused);
             }
 
             foreach (var entry in value.EnumerateArray())
@@ -294,11 +367,14 @@ public sealed class InventoryReach(
             if (next is not null && pages >= pageLimit)
             {
                 return new Resolution(people,
-                    $"stopped at the {pageLimit}-page limit with more members waiting - this list is short, not complete");
+                    $"stopped at the {pageLimit}-page limit with more members waiting - this list is short, not complete",
+                    Outcome.Refused);
             }
         }
 
-        return new Resolution(people, null);
+        return people.Count > 0
+            ? new Resolution(people, null, Outcome.People)
+            : new Resolution([], "the directory group was read and has no members", Outcome.Empty);
     }
 
     /// <summary>
