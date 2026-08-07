@@ -95,10 +95,21 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         /// <summary>Why <c>MetaInfo</c> is missing, when it is. Never left to be inferred from silence.</summary>
         public string? MetaInfoUnread { get; set; }
 
+        /// <summary>Which half of the response carried <c>MetaInfo</c>, so the route stays visible.</summary>
+        public string? MetaInfoFrom { get; set; }
+
+        /// <summary>Every key Graph returned in the list item's field bag, in the order it sent them.</summary>
+        public IReadOnlyList<string> FieldNames { get; set; } = [];
+
         /// <summary>Whether Graph returned the list item's field bag at all.</summary>
         public bool FieldsRead { get; set; }
 
         public string? FieldsUnread { get; set; }
+
+        /// <summary>What came back when the missing columns were asked for by name, and what did not.</summary>
+        public IReadOnlyList<string> NamedSelectAnswered { get; set; } = [];
+
+        public string? NamedSelectRefused { get; set; }
 
         /// <summary>The interesting columns' values, by internal name. Absent keys never arrived.</summary>
         public Dictionary<string, string> Columns { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -131,6 +142,13 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             get
             {
                 if (Unreadable is not null)
+                {
+                    return "?";
+                }
+
+                // An unread property bag is not a file without a label. Run 77 printed "carries no
+                // label" for four documents whose MetaInfo had simply not been fetched.
+                if (MetaInfoRead is not true)
                 {
                     return "?";
                 }
@@ -257,6 +275,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             report.Add(SubjectObservation(subject));
         }
 
+        report.Add(FieldBagObservation(subjects));
         report.Add(DocumentIdObservation(columns, subjects));
         report.Add(VerdictObservation(subjects));
         report.Finish();
@@ -423,7 +442,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         var url = $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
-                  $"/items({subject.ListItemId})";
+                  $"/items({subject.ListItemId})?$expand=FieldValuesAsText";
 
         var observation = await caller.GetAsync(url, sharePointToken, cancellationToken, SharePointAccept);
         calls.Add(observation);
@@ -435,10 +454,29 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             return;
         }
 
-        var metaInfo = Text(root.Value, "MetaInfo");
+        // Run 77 removed the expansion above on the reasoning that it was not taking effect, and lost
+        // MetaInfo entirely - it had been arriving through it all along. Both places are read now, and
+        // which one answered is recorded, so the next person to think this call is redundant can see
+        // that it is not.
+        var expanded = root.Value.TryGetProperty("FieldValuesAsText", out var text) &&
+                       text.ValueKind == JsonValueKind.Object
+            ? text
+            : default;
+
+        var metaInfo = expanded.ValueKind == JsonValueKind.Object ? Text(expanded, "MetaInfo") : null;
+        subject.MetaInfoFrom = metaInfo is null ? null : "FieldValuesAsText";
+
         if (metaInfo is null)
         {
-            subject.MetaInfoUnread = "the item came back without a MetaInfo value";
+            metaInfo = Text(root.Value, "MetaInfo");
+            subject.MetaInfoFrom = metaInfo is null ? null : "the item itself";
+        }
+
+        if (metaInfo is null)
+        {
+            subject.MetaInfoUnread = expanded.ValueKind == JsonValueKind.Object
+                ? "neither the item nor its expanded text values carried MetaInfo"
+                : "the item came back with no MetaInfo and no FieldValuesAsText";
             return;
         }
 
@@ -477,10 +515,46 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         subject.FieldsRead = true;
+        subject.FieldNames = fields.EnumerateObject().Select(p => p.Name).ToList();
+        Harvest(fields, columns, subject);
 
-        // Every discovered column plus the three named ones, whether or not the list defines them:
-        // a name Graph answers about that the list never declared would itself be worth seeing.
-        foreach (var name in columns.Select(c => c.InternalName).Concat(NamedColumns).Distinct(StringComparer.OrdinalIgnoreCase))
+        var wanted = columns.Select(c => c.InternalName).Concat(NamedColumns)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (wanted.All(subject.Columns.ContainsKey))
+        {
+            return;
+        }
+
+        // The default expansion left some of them out. Asking for them by name is a different
+        // question from asking for everything, and SharePoint has already been measured answering
+        // the two differently (finding 14: /fields lists a column that $select then calls
+        // nonexistent). So it is asked, and what comes back is reported either way.
+        var missing = string.Join(",", wanted.Where(w => !subject.Columns.ContainsKey(w)));
+        var second = await caller.GetAsync(
+            $"{GraphBase}/sites/{siteId}/drive/items/{subject.ItemId}/listItem" +
+            $"?$expand=fields($select={Uri.EscapeDataString(missing)})",
+            token,
+            cancellationToken);
+        calls.Add(second);
+
+        var retryRoot = Root(second);
+        if (retryRoot is null || !retryRoot.Value.TryGetProperty("fields", out var named) ||
+            named.ValueKind != JsonValueKind.Object)
+        {
+            subject.NamedSelectRefused = Describe(second);
+            return;
+        }
+
+        subject.NamedSelectAnswered = named.EnumerateObject().Select(p => p.Name).ToList();
+        Harvest(named, columns, subject);
+    }
+
+    private static void Harvest(JsonElement fields, IReadOnlyList<Column> columns, Subject subject)
+    {
+        foreach (var name in columns.Select(c => c.InternalName).Concat(NamedColumns)
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!fields.TryGetProperty(name, out var value))
             {
@@ -607,9 +681,10 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             return $"MetaInfo did not arrive ({subject.MetaInfoUnread ?? "not asked"})";
         }
 
+        var from = subject.MetaInfoFrom is null ? "" : $" [from {subject.MetaInfoFrom}]";
         return subject.InFile.Count == 0
-            ? "no MSIP_Label entries"
-            : string.Join("; ", subject.InFile.Select(l => l.Describe));
+            ? $"no MSIP_Label entries{from}"
+            : $"{string.Join("; ", subject.InFile.Select(l => l.Describe))}{from}";
     }
 
     /// <summary>
@@ -753,7 +828,10 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         {
             "yes" => $"the file carries {subject.CarriedLabelId ?? "a label"}, and a column names it",
             "no" => $"the file carries {subject.CarriedLabelId ?? "a label"}; no column names it",
-            _ => "the file carries no label",
+            "-" => "the file carries no label",
+            _ when subject.MetaInfoRead is not true =>
+                $"undecided - MetaInfo was never read ({subject.MetaInfoUnread ?? "not asked"})",
+            _ => $"undecided - the columns were never read ({subject.FieldsUnread ?? "not asked"})",
         };
 
         return Observation.Measured(subject.Path, observed) with
@@ -788,6 +866,54 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
     /// settings page. It is one of the documented reasons promotion does not run, and it is the only
     /// one of them this can see without changing anything.
     /// </summary>
+    /// <summary>
+    /// Every key Graph put in the field bag, listed rather than searched.
+    /// <para>
+    /// Three routes have now been asked for the label columns and none of them returned one, while a
+    /// delegated PowerShell call during finding 14 read <c>_IpLabelId</c> as an empty string. That
+    /// gap is either about the route or about the caller, and neither can be told apart by trying
+    /// another name from memory. So the keys that did arrive are printed, once, and whatever is
+    /// missing from that list is missing as a fact rather than as a guess.
+    /// </para>
+    /// </summary>
+    private static Observation FieldBagObservation(IReadOnlyList<Subject> subjects)
+    {
+        var read = subjects.Where(s => s.FieldsRead).ToList();
+        if (read.Count == 0)
+        {
+            return Observation.NotRun(
+                "what the field bag actually contains",
+                "no file's field bag came back, so there was nothing to enumerate");
+        }
+
+        var sample = read[0];
+        var everywhere = read.Skip(1)
+            .Aggregate(
+                new HashSet<string>(sample.FieldNames, StringComparer.Ordinal),
+                (set, s) => { set.IntersectWith(s.FieldNames); return set; });
+
+        var labelish = everywhere.Where(IsInteresting).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        return Observation.Measured(
+            "what the field bag actually contains",
+            $"{everywhere.Count} keys arrive for every file; {labelish.Count} of them could hold a label" +
+            (labelish.Count == 0 ? " - none" : $" - {string.Join(", ", labelish)}")) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["keysCommonToEveryFile"] = string.Join(", ", everywhere.OrderBy(n => n, StringComparer.Ordinal)),
+                ["labelCapableKeys"] = labelish.Count == 0 ? "(none)" : string.Join(", ", labelish),
+                ["answeredWhenAskedByName"] = read.Any(s => s.NamedSelectAnswered.Count > 0)
+                    ? string.Join(", ", read.SelectMany(s => s.NamedSelectAnswered).Distinct(StringComparer.Ordinal))
+                    : "(nothing extra)",
+                ["refusedWhenAskedByName"] = read.Select(s => s.NamedSelectRefused).FirstOrDefault(r => r is not null),
+                ["note"] = "the list declares the label columns as hidden Lookups; whether that, the " +
+                           "route, or the app-only caller is what keeps them out of this bag has not " +
+                           "been separated",
+            },
+        };
+    }
+
     private static Observation DocumentIdObservation(
         IReadOnlyList<Column> columns, IReadOnlyList<Subject> subjects)
     {
