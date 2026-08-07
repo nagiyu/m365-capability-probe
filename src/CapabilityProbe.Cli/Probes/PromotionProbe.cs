@@ -92,12 +92,25 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         /// </summary>
         public bool? MetaInfoRead { get; set; }
 
+        /// <summary>Why <c>MetaInfo</c> is missing, when it is. Never left to be inferred from silence.</summary>
+        public string? MetaInfoUnread { get; set; }
+
+        /// <summary>Whether Graph returned the list item's field bag at all.</summary>
+        public bool FieldsRead { get; set; }
+
+        public string? FieldsUnread { get; set; }
+
         /// <summary>The interesting columns' values, by internal name. Absent keys never arrived.</summary>
         public Dictionary<string, string> Columns { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public string? GraphCreatedBy { get; set; }
-        public string? Author { get; set; }
-        public string? Editor { get; set; }
+
+        /// <summary>
+        /// Who wrote it last, which is not who uploaded it. Run 76 read these from SharePoint and got
+        /// lookup ids - bare numbers where a report needs a person - so both now come from Graph,
+        /// where they arrive as identities.
+        /// </summary>
+        public string? LastModifiedBy { get; set; }
         public string? Created { get; set; }
         public string? Modified { get; set; }
 
@@ -125,6 +138,14 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                 if (InFile.Count == 0)
                 {
                     return "-";
+                }
+
+                // Run 76 printed "no" for four files whose columns had never been read, because the
+                // comparison had nothing to compare against and an empty set matches nothing. A
+                // verdict about a source this never saw is worse than no verdict.
+                if (!FieldsRead)
+                {
+                    return "?";
                 }
 
                 var ids = InFile.Select(l => l.Id).ToList();
@@ -212,10 +233,15 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                 await ExtractAsync(caller, siteId, subject, graph.AccessToken, calls, cancellationToken);
             }
 
+            if (subject.ItemId is not null)
+            {
+                await ReadFieldsAsync(caller, siteId, subject, columns, graph.AccessToken, calls, cancellationToken);
+            }
+
             if (subject.ListItemId is not null && libraryPath is not null)
             {
                 await ReadListAsync(
-                    caller, libraryPath, subject, columns, sharePoint.AccessToken, calls, cancellationToken);
+                    caller, libraryPath, subject, sharePoint.AccessToken, calls, cancellationToken);
             }
         }
 
@@ -324,6 +350,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         subject.Created = Text(root.Value, "createdDateTime");
         subject.Modified = Text(root.Value, "lastModifiedDateTime");
         subject.GraphCreatedBy = Identity(root.Value, "createdBy");
+        subject.LastModifiedBy = Identity(root.Value, "lastModifiedBy");
 
         if (root.Value.TryGetProperty("sharepointIds", out var ids) && ids.ValueKind == JsonValueKind.Object)
         {
@@ -376,26 +403,27 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
     }
 
     /// <summary>
-    /// The list item, with every field's text form expanded. <c>MetaInfo</c> arrives here and nowhere
-    /// else, which is why the expansion is worth the bytes.
+    /// The list item's <c>MetaInfo</c>, which is the document's own property bag and arrives from
+    /// nowhere else. Only that: run 76 measured the field expansion asked for here not taking effect -
+    /// every hidden Lookup column came back absent and the people columns came back as lookup ids -
+    /// so the columns are read from Graph instead, and this call is left doing the one job it does.
     /// </summary>
     private async Task ReadListAsync(
         ThrottleAwareCaller caller,
         string libraryPath,
         Subject subject,
-        IReadOnlyList<Column> columns,
         string? sharePointToken,
         List<HttpObservation> calls,
         CancellationToken cancellationToken)
     {
         if (sharePointToken is null)
         {
-            subject.Columns["(not asked)"] = "no SharePoint token";
+            subject.MetaInfoUnread = "no SharePoint token";
             return;
         }
 
         var url = $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
-                  $"/items({subject.ListItemId})?$expand=FieldValuesAsText";
+                  $"/items({subject.ListItemId})";
 
         var observation = await caller.GetAsync(url, sharePointToken, cancellationToken, SharePointAccept);
         calls.Add(observation);
@@ -403,31 +431,68 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         var root = Root(observation);
         if (root is null)
         {
-            subject.Columns["(not read)"] = Describe(observation);
+            subject.MetaInfoUnread = Describe(observation);
             return;
         }
 
-        var text = root.Value.TryGetProperty("FieldValuesAsText", out var values) &&
-                   values.ValueKind == JsonValueKind.Object
-            ? values
-            : root.Value;
-
-        subject.Author = Text(text, "Author");
-        subject.Editor = Text(text, "Editor");
-
-        var metaInfo = Text(text, "MetaInfo");
-        subject.MetaInfoRead = metaInfo is not null;
-        subject.InFile = SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(metaInfo));
-
-        foreach (var column in columns)
+        var metaInfo = Text(root.Value, "MetaInfo");
+        if (metaInfo is null)
         {
-            // Recorded only when the value actually arrived. An absent key and an empty string are
-            // different answers, and collapsing them is how a column that was never returned would
-            // read as a column the service deliberately left blank.
-            if (text.TryGetProperty(column.InternalName, out var cell) && cell.ValueKind == JsonValueKind.String)
+            subject.MetaInfoUnread = "the item came back without a MetaInfo value";
+            return;
+        }
+
+        subject.MetaInfoRead = true;
+        subject.InFile = SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(metaInfo));
+    }
+
+    /// <summary>
+    /// The list item's columns, through Graph.
+    /// <para>
+    /// This is the route that was known to work and was not being used. The label columns are hidden
+    /// Lookups, which SharePoint REST leaves out of an item's default projection and refuses to
+    /// <c>$select</c> by name (finding 14); Graph's <c>listItem</c> expansion returns them, empty
+    /// value and all - which is the distinction this whole run is about.
+    /// </para>
+    /// </summary>
+    private async Task ReadFieldsAsync(
+        ThrottleAwareCaller caller,
+        string siteId,
+        Subject subject,
+        IReadOnlyList<Column> columns,
+        string token,
+        List<HttpObservation> calls,
+        CancellationToken cancellationToken)
+    {
+        var url = $"{GraphBase}/sites/{siteId}/drive/items/{subject.ItemId}/listItem?$expand=fields";
+        var observation = await caller.GetAsync(url, token, cancellationToken);
+        calls.Add(observation);
+
+        var root = Root(observation);
+        if (root is null || !root.Value.TryGetProperty("fields", out var fields) ||
+            fields.ValueKind != JsonValueKind.Object)
+        {
+            subject.FieldsUnread = Describe(observation);
+            return;
+        }
+
+        subject.FieldsRead = true;
+
+        // Every discovered column plus the three named ones, whether or not the list defines them:
+        // a name Graph answers about that the list never declared would itself be worth seeing.
+        foreach (var name in columns.Select(c => c.InternalName).Concat(NamedColumns).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!fields.TryGetProperty(name, out var value))
             {
-                subject.Columns[column.InternalName] = cell.GetString() ?? string.Empty;
+                continue;
             }
+
+            subject.Columns[name] = value.ValueKind switch
+            {
+                JsonValueKind.String => value.GetString() ?? string.Empty,
+                JsonValueKind.Null => string.Empty,
+                _ => value.GetRawText(),
+            };
         }
     }
 
@@ -537,9 +602,9 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             return "not read";
         }
 
-        if (subject.MetaInfoRead is false)
+        if (subject.MetaInfoRead is not true)
         {
-            return "MetaInfo did not arrive";
+            return $"MetaInfo did not arrive ({subject.MetaInfoUnread ?? "not asked"})";
         }
 
         return subject.InFile.Count == 0
@@ -559,19 +624,24 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             return "not read";
         }
 
+        if (!subject.FieldsRead)
+        {
+            return $"the field bag never arrived ({subject.FieldsUnread ?? "not asked"})";
+        }
+
         var parts = NamedColumns.Select(name =>
         {
-            if (!columns.Any(c => c.InternalName.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            if (subject.Columns.TryGetValue(name, out var value))
             {
-                return $"{name}: the list defines no such column";
+                return value.Length == 0 ? $"{name}: empty" : $"{name}={value}";
             }
 
-            if (!subject.Columns.TryGetValue(name, out var value))
-            {
-                return $"{name}: did not arrive";
-            }
-
-            return value.Length == 0 ? $"{name}: empty" : $"{name}={value}";
+            // The bag arrived and this key was not in it. Whether the list even declares the column
+            // is the other half of that answer, and the two together say something the pair apart
+            // does not: a declared column Graph omits is not the same as a column nobody defined.
+            return columns.Any(c => c.InternalName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                ? $"{name}: declared by the list, absent from the field bag"
+                : $"{name}: the list defines no such column, and it was absent";
         });
 
         return string.Join("; ", parts);
@@ -607,10 +677,15 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
             return string.Join("; ", filled);
         }
 
+        if (!subject.FieldsRead)
+        {
+            return $"the field bag never arrived ({subject.FieldsUnread ?? "not asked"})";
+        }
+
         var absent = labelColumns.Count(c => !subject.Columns.ContainsKey(c.InternalName));
         return absent == labelColumns.Count
-            ? $"none arrived ({absent} columns exist, none came back)"
-            : $"all empty ({labelColumns.Count - absent} arrived empty, {absent} did not arrive)";
+            ? $"all {absent} declared columns were absent from the field bag"
+            : $"all empty ({labelColumns.Count - absent} arrived empty, {absent} were absent)";
     }
 
     /// <summary>
@@ -620,14 +695,13 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
     /// </summary>
     private static ProbeTable BuildProvenanceTable(IReadOnlyList<Subject> subjects, DateTimeOffset runAt) =>
         new("Who made each file, how old it is now, and what identifiers it got",
-            ["file", "since it changed", "Graph createdBy", "SP Author", "SP Editor", "modified", "Document ID", "bytes"],
+            ["file", "since it changed", "uploaded by", "last written by", "modified", "Document ID", "bytes"],
             subjects.Select(s => (IReadOnlyList<string?>)new[]
             {
                 s.Path,
                 Age(s.Modified ?? s.Created, runAt),
                 s.GraphCreatedBy ?? "not read",
-                s.Author ?? "not read",
-                s.Editor ?? "not read",
+                s.LastModifiedBy ?? "not read",
                 s.Modified ?? "not read",
                 s.Columns.TryGetValue("_dlc_DocId", out var docId)
                     ? docId.Length > 0 ? docId : "empty"
@@ -701,7 +775,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["extractStatus"] = subject.ExtractStatus,
                 ["extractCodes"] = subject.ExtractCodes,
                 ["graphCreatedBy"] = subject.GraphCreatedBy,
-                ["sharePointAuthor"] = subject.Author,
+                ["lastModifiedBy"] = subject.LastModifiedBy,
                 ["listItemId"] = subject.ListItemId,
                 ["created"] = subject.Created,
                 ["modified"] = subject.Modified,
@@ -748,6 +822,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         var withLabel = subjects.Where(s => s.Unreadable is null && s.InFile.Count > 0).ToList();
         var promoted = withLabel.Where(s => s.Promoted == "yes").Select(s => s.Path).ToList();
         var not = withLabel.Where(s => s.Promoted == "no").Select(s => s.Path).ToList();
+        var undecided = withLabel.Where(s => s.Promoted == "?").Select(s => s.Path).ToList();
 
         if (withLabel.Count == 0)
         {
@@ -756,11 +831,19 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                 "no file in this run carried a label, so nothing was promotable - this run answers nothing");
         }
 
-        var observed = not.Count == 0
-            ? $"every one of the {withLabel.Count} labelled files promoted"
-            : promoted.Count == 0
-                ? $"none of the {withLabel.Count} labelled files promoted"
-                : $"{promoted.Count} of {withLabel.Count} promoted; the split is the answer";
+        if (undecided.Count == withLabel.Count)
+        {
+            return Observation.Measured(
+                "does this happen to files made now",
+                $"undecided for all {withLabel.Count} labelled files - their columns were never read, " +
+                "so nothing here says whether promotion happened");
+        }
+
+        var observed = (not.Count == 0 ? $"every one of the {promoted.Count} decided files promoted"
+                : promoted.Count == 0
+                    ? $"none of the {not.Count} decided files promoted"
+                    : $"{promoted.Count} promoted, {not.Count} did not") +
+            (undecided.Count == 0 ? "" : $"; {undecided.Count} undecided (columns never read)");
 
         return Observation.Measured("does this happen to files made now", observed) with
         {
@@ -769,6 +852,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                 ["labelledFiles"] = withLabel.Count.ToString(),
                 ["promoted"] = promoted.Count == 0 ? "(none)" : string.Join(", ", promoted),
                 ["notPromoted"] = not.Count == 0 ? "(none)" : string.Join(", ", not),
+                ["undecided"] = undecided.Count == 0 ? "(none)" : string.Join(", ", undecided),
                 ["note"] = "every file here was read in one call sequence, so the difference between " +
                            "rows is how each file was made and not when it was measured",
             },
