@@ -131,10 +131,19 @@ public static class ProbeOptionsLoader
 
         if (!hasLocalFile && !hasSiteFile)
         {
+            // FilePaths is the key every other subcommand takes its paths from, and a run of 'consume'
+            // that has one set and the other empty is almost certainly a value put in the wrong box
+            // rather than a run nobody configured. Saying so costs a sentence and saves a round trip.
+            var misplaced = string.IsNullOrWhiteSpace(options.FilePaths)
+                ? string.Empty
+                : $". FilePaths is set ({options.Files.Count} path(s)) - 'consume' does not read it; " +
+                  "the same values probably belong in ProtectedSiteFiles";
+
             problems.Add(new ConfigurationProblem(
                 "ProtectedFilePaths / ProtectedSiteFiles",
                 "neither is set - 'consume' needs at least one protected file, either paths on this machine " +
-                "(inside the container, under /work/samples) or paths inside the site's document library",
+                "(inside the container, under /work/samples) or paths inside the site's document library" +
+                misplaced,
                 ConsumeOnly));
         }
         else if (hasLocalFile && hasSiteFile)
