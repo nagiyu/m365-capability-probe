@@ -527,3 +527,8 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 2026-08-07 | **ライブラリに 5 枚追加**（`e-link-view.docx` / `f-link-people.docx` / `g-link-existing.docx` と、`restricted/deeper/h-deep.docx` / `restricted/test.docx`）。**`restricted/deeper` フォルダを新規作成。** `restricted/test.docx` は**ルートの `test.docx` と同名**で、結合が名前ではなく ID で行われていることの試験材料です。**8 → 14 アイテム。** リンクを 2 本作ったので**サイト グループも 2 つ増えました**（`sitegroups(15)` / `(17)`）― 測定が環境を変えています |
 | 2026-08-07 | **外部共有は無効のまま**です。「リンクを知っている全員」が共有ダイアログに出ないことを画面で確認しました ― **匿名リンクは作れず、`anonymous` の対象範囲は未観測**です。設定は変更していません |
 | 2026-08-07 | **実行 #74。** 再帰と結合が通り、**14 アイテムが `listItemId` で 14/14 一致**。所見 16（グループ名の `Flexible` と Graph の `users` が対応しない）と所見 17（`existingAccess` のリンクはどこにも痕跡を残さない）が出ました |
+| 2026-08-07 | **`probe メンバー` にミクとリンを追加**（編集）。空だったグループが本来の役目を持ちました。**`inventory` の基準線が変わります** ― 所見 15 で「ミクは 1 枚だけ開ける」と測った状態はもうありません |
+| 2026-08-07 | **ライブラリに 3 枚追加**（`i-new.docx` / `j-other-uploader.docx` / `k-miku-uploaded.docx`）と、**`probe-rin-protected.docx` を落として同じ名前で上げ直し**。すべて `probe-miku-only` ラベル（`17b60be9-…`）。`i` はミクが Word for the web でライブラリ上に直接作成（**暗号化されずに置かれます**）、`j` はそれを落とした暗号化済みのコピーを**リン**が、`k` は**同じバイト列**を**ミク**がアップロード |
+| 2026-08-07 | **ラベルの設定を `Get-Label` で読み取り**（変更なし）。`probe-miku-only` は `Type: encrypt` / `disabled: false` / **`contentexpiredondateindaysornever: Never`** / **`doublekeyencryptionurl` のキーは無く `protectiontype: template`** / `rightsdefinitions` は**ミク 1 人**。有効期限も DKE も除外条件に当たらないので、4 レグに通して使えました |
+| 2026-08-07 | **ドキュメント ID サービスは無効**。ライブラリに `_dlc_DocId` 列が定義されていません（実行 #75）。依頼書の 5 本目「無効なライブラリへ上げる」は**不要**になりました |
+| 2026-08-07 | **実行 #76〜#79（`promotion`）。テナントは上記以外は無変更。** 所見 18 が出ました ― **置いた人がラベルの権利を持っているかで、昇格するかが決まります**。5 本が 5 本ともその列で割れ、`j` と `k`（同じバイト列・置いた人だけ違う）が直接の証拠です |
