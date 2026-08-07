@@ -164,7 +164,12 @@
 
 ## Entra: アプリ登録
 
-アプリ登録は 1 つ。管理者の同意を与えたのは、正確に次のものだけです。
+**アプリ登録は 2 つです。**
+
+### 1. `capability-probe` ― 測定用（凍結）
+
+**所見 1〜14 はすべてこの登録の測定です。** 比較の基準線なので、**もう変えません。**
+管理者の同意を与えたのは、正確に次のものだけです。
 
 | API | アクセス許可 | 種類 | 管理者の同意 |
 | --- | --- | --- | --- |
@@ -190,6 +195,32 @@
 測定結果は読めます。
 
 Microsoft Graph 側は初版から一度も変えていません ― **対照として固定してあります**。
+
+### 2. `capability-inventory` ― `inventory` 用（2026-08-06 に発行）
+
+**`inventory` だけがこの登録を名乗ります。** `capability-probe` を凍結したまま強い付与を試せる
+ように分けました ― **弱い登録と強い登録で同じサイトを並べ、空欄がどこに移るかを見ること自体が
+測定**なので (実行 #70 と #71 がその 1 組です)。
+
+| API | アクセス許可 | 種類 | 管理者の同意 |
+| --- | --- | --- | --- |
+| Microsoft Graph | `Sites.Read.All` | アプリケーション | 済 |
+| Microsoft Graph | `GroupMember.Read.All` | アプリケーション | 済 |
+| Microsoft Graph | `User.ReadBasic.All` | アプリケーション | 済 |
+| SharePoint | **`Sites.FullControl.All`** | アプリケーション | 済 |
+
+**シークレットはありません。証明書だけ**です (`CN=capability-inventory`、拇印
+`D5DD64E7C70691EF85AD82811ADEDA819825F2B0`、2027-08-06 まで)。所見 5 の裏付けのとおり、
+**Entra の app-only が SharePoint REST に通るには証明書が必須**なので、シークレットを置いても
+B 節は動きません。
+
+`InformationProtectionPolicy.Read.All` の類は**足していません** ― 実行 #70 で
+`extractSensitivityLabels` が `Sites.Read.All` だけで `200` を返しているので、不要と実測できています。
+
+**この登録は `Sites.FullControl.All` を持ったままです。** `capability-probe` 側の方針
+（測り終えたら戻す）とは違いますが、**`inventory` はその付与が前提の道具**なので残します。
+テナント内の全サイト コレクションに対するフル コントロールが、**証明書つきで CI にある**という
+ことです。
 
 **意図的に付与していないもの** ― これらの欠落が測定対象です。
 
@@ -491,3 +522,8 @@ E と F は所見 9 のためのもので、他の 4 つとは測っているも
 | 2026-08-05 | **Graph Explorer に `GroupMember.Read.All` と `User.Read.All` (いずれも委任) を管理者同意。** 同意先は **Microsoft の Graph Explorer アプリ**で、**このプローブのアプリ登録は無変更**です ― `auth` の出力は動きません。`transitiveMembers` を 7 本測定 (所見 13)。**`User.Read.All` を足す前後で、同じ URL の `displayName` が `null` → `ミク` に変わりました** |
 | 2026-08-05 | **すべて戻した** ― `Remove-AipServiceSuperUser`、`Disable-AipServiceSuperUserFeature`、Entra から `Content.SuperUser` を削除。`auth` (#52) と `consume` (#53) が **#45 / #46 と一致**することを確認。**戻ったことも測定です** |
 | 2026-08-05 | **#43 の入力に打ち間違いがありました** (`miku@nagiyu3.onmicrosoft` ― `.com` 抜け)。返ったのは `ServiceDisabledException` (「このテナントでは RMS が無効」) で、**ドメイン部でテナントが選ばれている**ことが分かりました。#44 で `.com` を足すと同じ行が `NoPermissionsException` になり、**原因が入力側だと確定**しています |
+| 2026-08-06 | **Entra に 2 つ目のアプリ登録 `capability-inventory` を発行**（証明書のみ、シークレットなし）。Graph `Sites.Read.All` / `GroupMember.Read.All` / `User.ReadBasic.All`、SharePoint **`Sites.FullControl.All`**。**`capability-probe` は無変更で凍結。** 実行 #70（弱い登録）で B 節が `403`、#71（新登録）で `200` ― **動いたのは SharePoint の 1 本だけ**です |
+| 2026-08-06 | **`inventory` の一連（#68〜#73）。テナントは無変更。** 所見 15（`制限付きアクセス` が到達範囲を 5 倍に見せる）が出ました。**サイトの `probe メンバー` グループが空**であることも判明 ― `編集` を持つのに誰も入っていないので、C 節はその役割から 1 人も出しません |
+| 2026-08-07 | **ライブラリに 5 枚追加**（`e-link-view.docx` / `f-link-people.docx` / `g-link-existing.docx` と、`restricted/deeper/h-deep.docx` / `restricted/test.docx`）。**`restricted/deeper` フォルダを新規作成。** `restricted/test.docx` は**ルートの `test.docx` と同名**で、結合が名前ではなく ID で行われていることの試験材料です。**8 → 14 アイテム。** リンクを 2 本作ったので**サイト グループも 2 つ増えました**（`sitegroups(15)` / `(17)`）― 測定が環境を変えています |
+| 2026-08-07 | **外部共有は無効のまま**です。「リンクを知っている全員」が共有ダイアログに出ないことを画面で確認しました ― **匿名リンクは作れず、`anonymous` の対象範囲は未観測**です。設定は変更していません |
+| 2026-08-07 | **実行 #74。** 再帰と結合が通り、**14 アイテムが `listItemId` で 14/14 一致**。所見 16（グループ名の `Flexible` と Graph の `users` が対応しない）と所見 17（`existingAccess` のリンクはどこにも痕跡を残さない）が出ました |
