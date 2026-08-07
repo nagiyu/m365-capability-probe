@@ -67,6 +67,9 @@ public static class Program
                 ProbeOptionsLoader.InventoryCommand =>
                     await RunInventoryAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.PromotionCommand =>
+                    await RunPromotionAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -114,6 +117,12 @@ public static class Program
         return await new InventoryProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunPromotionAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new PromotionProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -151,6 +160,10 @@ public static class Program
         writer.WriteLine("              be used rather than only read - it honours Retry-After, it never prints a");
         writer.WriteLine("              protection value it did not establish, and whatever it could not resolve");
         writer.WriteLine("              gets a row of its own saying why");
+        writer.WriteLine("  promotion   why a label inside a document does not reach the list's columns. takes");
+        writer.WriteLine("              several files in FilePaths and reads all of them in one call sequence,");
+        writer.WriteLine("              so the difference between rows is how each file was made, not when");
+        writer.WriteLine("              it was measured"); 
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

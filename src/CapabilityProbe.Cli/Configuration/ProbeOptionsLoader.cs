@@ -22,12 +22,25 @@ public static class ProbeOptionsLoader
     public const string ConsumeCommand = "consume";
     public const string InventoryCommand = "inventory";
 
+    /// <summary>
+    /// Why a label inside a document does not reach the list's columns (finding 14's open question).
+    /// Kept apart from <c>inventory</c> because it asks about named files rather than a library, and
+    /// because its answer is a comparison between them rather than a picture of what is there.
+    /// </summary>
+    public const string PromotionCommand = "promotion";
+
     public static readonly string[] AllCommands =
-        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand, InventoryCommand];
+    [
+        AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
+        InventoryCommand, PromotionCommand,
+    ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
     private static readonly string[] NeedsApp =
-        [AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand];
+    [
+        AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
+        PromotionCommand,
+    ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
 
@@ -50,7 +63,14 @@ public static class ProbeOptionsLoader
     /// </summary>
     private static readonly string[] InventoryOnly = [InventoryCommand];
 
-    private static readonly string[] AccessOnly = [AccessCommand];
+    /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
+    private static readonly string[] SiteReaders = [InventoryCommand, PromotionCommand];
+
+    /// <summary>
+    /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
+    /// run with none configured has nothing to compare.
+    /// </summary>
+    private static readonly string[] NeedsFilePaths = [AccessCommand, PromotionCommand];
 
     private static readonly string[] AclOnly = [AclCommand];
 
@@ -111,10 +131,19 @@ public static class ProbeOptionsLoader
 
         if (!hasLocalFile && !hasSiteFile)
         {
+            // FilePaths is the key every other subcommand takes its paths from, and a run of 'consume'
+            // that has one set and the other empty is almost certainly a value put in the wrong box
+            // rather than a run nobody configured. Saying so costs a sentence and saves a round trip.
+            var misplaced = string.IsNullOrWhiteSpace(options.FilePaths)
+                ? string.Empty
+                : $". FilePaths is set ({options.Files.Count} path(s)) - 'consume' does not read it; " +
+                  "the same values probably belong in ProtectedSiteFiles";
+
             problems.Add(new ConfigurationProblem(
                 "ProtectedFilePaths / ProtectedSiteFiles",
                 "neither is set - 'consume' needs at least one protected file, either paths on this machine " +
-                "(inside the container, under /work/samples) or paths inside the site's document library",
+                "(inside the container, under /work/samples) or paths inside the site's document library" +
+                misplaced,
                 ConsumeOnly));
         }
         else if (hasLocalFile && hasSiteFile)
@@ -162,8 +191,8 @@ public static class ProbeOptionsLoader
         // consume normally needs no site at all. It does once its file is named as living in one, and
         // then a missing SiteUrl stops it just as surely as it stops the others.
         string[] siteUrlBlocks = hasSiteFile
-            ? [.. NeedsTenant, ConsumeCommand, InventoryCommand]
-            : [.. NeedsTenant, InventoryCommand];
+            ? [.. NeedsTenant, ConsumeCommand, .. SiteReaders]
+            : [.. NeedsTenant, .. SiteReaders];
 
         Require(problems, "SiteUrl", options.SiteUrl, siteUrlBlocks,
             "https://<host>/sites/<name>; the SharePoint scope is built from its host name");
@@ -174,7 +203,7 @@ public static class ProbeOptionsLoader
             Require(problems, "DelegatedUserHint", options.DelegatedUserHint, NeedsTenant,
                 "sign-in name to use for the device code leg, shown on screen before sign-in");
         }
-        Require(problems, "FilePaths", options.FilePaths, AccessOnly,
+        Require(problems, "FilePaths", options.FilePaths, NeedsFilePaths,
             "one or more paths inside the site's default document library, separated by '|', e.g. /test.docx|/drafts/q3.docx");
 
         // These keys used to be singular. Saying so beats leaving a stale value silently ignored while
@@ -184,7 +213,7 @@ public static class ProbeOptionsLoader
             problems.Add(new ConfigurationProblem(
                 "FilePath",
                 "renamed to FilePaths, which takes several paths separated by '|'. The old value is being ignored",
-                AccessOnly));
+                NeedsFilePaths));
         }
 
         foreach (var (oldKey, newKey) in RenamedConsumeKeys)
@@ -243,7 +272,7 @@ public static class ProbeOptionsLoader
             problems.Add(new ConfigurationProblem(
                 "FilePaths",
                 $"every path must start with '/': '{file}' (expected e.g. /test.docx)",
-                AccessOnly));
+                NeedsFilePaths));
         }
 
         // Both of these decide how much of a library a run looked at. A value that failed to parse
