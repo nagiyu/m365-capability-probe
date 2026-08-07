@@ -31,10 +31,33 @@ public sealed class InventoryReach(
     private const string GraphBase = "https://graph.microsoft.com/v1.0";
     private const string SharePointAccept = "application/json;odata=nometadata";
 
-    /// <summary>One person, as far as anything could be read about them.</summary>
-    public sealed record Person(string Display, string? Upn)
+    /// <summary>
+    /// One person, as far as anything could be read about them, and what stood between them and the
+    /// grant.
+    /// <para>
+    /// <see cref="Through"/> is not decoration either. Run 73 printed a user as reachable "through
+    /// probe 閲覧者" when the actual chain was probe 閲覧者 → probe-group → that user, and answering
+    /// "why can this person open this file" meant going back to the call list and matching a group id
+    /// against an Entra blade by hand. A path with its middle missing is not a shorter answer, it is a
+    /// different one.
+    /// </para>
+    /// <para>
+    /// It names what this walked. Graph's <c>transitiveMembers</c> flattens nesting below a directory
+    /// group, so members that arrived through a group inside a group appear under the directory group
+    /// this asked about, with nothing between - that is a limit of the route, not an assertion that
+    /// there was nothing there.
+    /// </para>
+    /// </summary>
+    public sealed record Person(string Display, string? Upn, IReadOnlyList<string> Through)
     {
+        public Person(string display, string? upn) : this(display, upn, [])
+        {
+        }
+
+        /// <summary>Identity, which the route must not be part of: one person reached two ways is one person.</summary>
         public string Key => Upn ?? Display;
+
+        public Person Below(string container) => this with { Through = [container, .. Through] };
     }
 
     /// <summary>
@@ -127,7 +150,7 @@ public sealed class InventoryReach(
                     reached[key] = entry;
                 }
 
-                entry.Via.Add(grant.PrincipalTitle);
+                entry.Via.Add(string.Join(" -> ", new[] { grant.PrincipalTitle }.Concat(person.Through)));
                 entry.Roles.Add(roles);
             }
         }
@@ -266,7 +289,7 @@ public sealed class InventoryReach(
                 sharePointToken: null, // a SharePoint group cannot contain another SharePoint group
                 cancellationToken);
 
-            people.AddRange(inner.People);
+            people.AddRange(inner.People.Select(p => p.Below(title)));
             if (inner.Gap is not null)
             {
                 nested.Add($"{title}: {inner.Gap}");
