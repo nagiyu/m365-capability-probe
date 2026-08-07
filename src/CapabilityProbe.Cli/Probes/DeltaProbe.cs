@@ -286,14 +286,27 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         var onlyWithout = without.Except(with).OrderBy(k => k, StringComparer.Ordinal).ToList();
         var both = with.Intersect(without).OrderBy(k => k, StringComparer.Ordinal).ToList();
 
+        // One row per key rather than three rows of joined lists. The joined form truncated at the
+        // console's cell width, which put the very list this comparison is made of behind an ellipsis -
+        // a reader could not check whether a name was among the common keys, which is half the answer.
+        var rows = without.Union(with)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .Select(k => (IReadOnlyList<string?>)new[]
+            {
+                k,
+                without.Contains(k) ? "yes" : "-",
+                with.Contains(k) ? "yes" : "-",
+                onlyWith.Contains(k) ? "only with the header"
+                    : onlyWithout.Contains(k) ? "only without it"
+                    : "both",
+            })
+            .ToList();
+
         return new ProbeTable(
-            "What the header changed about the shape",
-            ["side", "keys"],
-            [
-                ["only with the header", onlyWith.Count == 0 ? "(none)" : string.Join(", ", onlyWith)],
-                ["only without it", onlyWithout.Count == 0 ? "(none)" : string.Join(", ", onlyWithout)],
-                ["in both", both.Count == 0 ? "(none)" : string.Join(", ", both)],
-            ]);
+            $"Every key either leg returned ({onlyWith.Count} only with the header, " +
+            $"{onlyWithout.Count} only without, {both.Count} in both)",
+            ["key", "without header", "with header", "side"],
+            rows.Count == 0 ? [["(neither leg returned an item)", "-", "-", "-"]] : rows);
     }
 
     /// <summary>
