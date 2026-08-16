@@ -73,6 +73,9 @@ public static class Program
                 ProbeOptionsLoader.DeltaCommand =>
                     await RunDeltaAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.PermissionsCommand =>
+                    await RunPermissionsAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -132,6 +135,12 @@ public static class Program
         return await new DeltaProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunPermissionsAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new PermissionsProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -181,6 +190,12 @@ public static class Program
         writer.WriteLine("              are what tell 'the service ignored it' apart from 'this route never says");
         writer.WriteLine("              anything about preferences', which one leg on its own cannot.");
         writer.WriteLine("              set DeltaToken to ask what moved since a previous run instead");
+        writer.WriteLine("  permissions is an app-only reading of driveItem/permissions being shown everything?");
+        writer.WriteLine("              the collection is filtered by who asks, and 200 OK looks the same");
+        writer.WriteLine("              whether or not it was trimmed - so each file in FilePaths is read");
+        writer.WriteLine("              twice in one run, once through Graph and once through SharePoint's");
+        writer.WriteLine("              own role assignments, and the two are subtracted. what could not be");
+        writer.WriteLine("              joined gets a row saying why rather than being counted as agreement");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

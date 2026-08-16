@@ -12,13 +12,13 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
       # for some choices. Left empty where it is needed, the probe stops and names the missing key.
       site_url:
-        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory, promotion, delta)"
+        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory, promotion, delta, permissions)"
         type: string
         required: false
         default: ""
@@ -37,7 +37,7 @@ on:
         required: false
         default: ""
       file_paths:
-        description: "FilePaths - access and promotion. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
+        description: "FilePaths - access, promotion and permissions. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
         type: string
         required: false
         default: ""
