@@ -70,6 +70,9 @@ public static class Program
                 ProbeOptionsLoader.PromotionCommand =>
                     await RunPromotionAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.DeltaCommand =>
+                    await RunDeltaAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -123,6 +126,12 @@ public static class Program
         return await new PromotionProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunDeltaAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new DeltaProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -163,7 +172,11 @@ public static class Program
         writer.WriteLine("  promotion   why a label inside a document does not reach the list's columns. takes");
         writer.WriteLine("              several files in FilePaths and reads all of them in one call sequence,");
         writer.WriteLine("              so the difference between rows is how each file was made, not when");
-        writer.WriteLine("              it was measured"); 
+        writer.WriteLine("              it was measured");
+        writer.WriteLine("  delta       what 'Prefer: hierarchicalsharing' does to a drive's delta, and what it");
+        writer.WriteLine("              costs. two legs in one run - the same call with and without the header -");
+        writer.WriteLine("              and the two key sets are subtracted rather than searched, so whatever the");
+        writer.WriteLine("              header adds appears because it arrived, not because it was looked for"); 
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
