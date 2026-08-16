@@ -98,6 +98,18 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         /// <summary>Which half of the response carried <c>MetaInfo</c>, so the route stays visible.</summary>
         public string? MetaInfoFrom { get; set; }
 
+        /// <summary>
+        /// The property bag exactly as SharePoint wrote it.
+        /// <para>
+        /// This tool gathers six named fields out of it and drops the rest, which was fine while the
+        /// question was "does the file carry a label". It is not fine once the question is who applied
+        /// one: whichever entry would answer that is among the fields being discarded, and a parser
+        /// that only keeps what it already knows about cannot surface a field nobody thought to name.
+        /// So the whole bag is quoted, and the reading is offered beside it rather than instead of it.
+        /// </para>
+        /// </summary>
+        public string? RawMetaInfo { get; set; }
+
         /// <summary>Every key Graph returned in the list item's field bag, in the order it sent them.</summary>
         public IReadOnlyList<string> FieldNames { get; set; } = [];
 
@@ -288,6 +300,15 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         report.Add(BuildPromotionTable(subjects, columns));
         report.Add(BuildProvenanceTable(subjects, runAt));
         report.Add(BuildCallTable(calls));
+
+        // Whole, outside the grid. Six fields are gathered out of this bag and the rest dropped,
+        // which was enough while the question was whether a file carries a label. It is not enough
+        // for a question about who applied one: a parser that keeps only what it was told to look
+        // for cannot show a field nobody named.
+        foreach (var subject in subjects.Where(s => s.RawMetaInfo is not null))
+        {
+            report.Quote($"MetaInfo for {subject.Path}", subject.RawMetaInfo!);
+        }
 
         foreach (var subject in subjects)
         {
@@ -500,6 +521,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         }
 
         subject.MetaInfoRead = true;
+        subject.RawMetaInfo = metaInfo;
         subject.InFile = SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(metaInfo));
     }
 
