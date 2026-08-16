@@ -129,6 +129,29 @@ public sealed record GrantParty
             var keys = new List<string>();
             var basis = new List<string>();
 
+            // Some rows here are not grants to anybody. Run 99 counted seven of them as "in SharePoint
+            // and not in Graph", which read as Graph hiding seven things - and every one was either a
+            // sharing link's backing group, which Graph does return as a 'link' entry, or one of
+            // SharePoint's own Limited Access bookkeeping groups, which Graph does not model at all.
+            //
+            // Neither is a missing grant. Keying them would put them in the subtraction and produce
+            // exactly the confident wrong number this repository keeps recording, so they are keyed
+            // as unjoinable and land in the table that says why.
+            var modelledHere = ModelledOnlyBySharePoint(g.Kind);
+            if (modelledHere is not null)
+            {
+                return new GrantParty
+                {
+                    Kind = g.Kind,
+                    Name = g.PrincipalTitle,
+                    Detail = g.Roles.Count == 0
+                        ? "(no role definitions arrived)"
+                        : string.Join(", ", g.Roles.Select(r => r.Describe)),
+                    Keys = [],
+                    KeyBasis = modelledHere,
+                };
+            }
+
             if (!string.IsNullOrWhiteSpace(g.LoginName))
             {
                 keys.Add($"login:{g.LoginName.ToLowerInvariant()}");
@@ -169,6 +192,32 @@ public sealed record GrantParty
                 KeyBasis = basis.Count == 0 ? "the assignment named nothing this tool could key on" : string.Join(" + ", basis),
             };
         }).ToList();
+
+    /// <summary>
+    /// Whether a SharePoint role assignment names something Graph's permission collection does not
+    /// model as a principal, and why. Null when it names an ordinary user or team, which is what the
+    /// subtraction is about.
+    /// <para>
+    /// The classification is <see cref="InventorySharing"/>'s, not a second copy of the same idea -
+    /// findings 15 and 16 were measured with it, and a row this tool categorised differently from
+    /// the inventory would be a disagreement between two implementations rather than about the data.
+    /// </para>
+    /// </summary>
+    private static string? ModelledOnlyBySharePoint(string kind) => kind switch
+    {
+        "a sharing link's backing group" =>
+            "not a missing grant - Graph returns this link as a 'link' entry instead, and the two " +
+            "identifiers cannot be joined (finding 16). Both sides' link rows are in this table",
+
+        "a system group SharePoint generated" =>
+            "not a missing grant - SharePoint's own Limited Access bookkeeping, which Graph's " +
+            "permission collection does not model at all",
+
+        _ when kind.Contains("a claim, not a membership", StringComparison.Ordinal) =>
+            "not a missing grant - a claim standing for a population, with no principal to key on",
+
+        _ => null,
+    };
 
     /// <summary>
     /// Graph's identity set, read for every shape it has been seen in. <c>siteUser</c> and

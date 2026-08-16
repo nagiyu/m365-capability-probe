@@ -348,7 +348,7 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         }
 
         return new ProbeTable(
-            "The subtraction - joinable grants only",
+            "The subtraction - grants naming a directory principal, on both sides",
             ["path", "kind", "principal", "in Graph", "in SharePoint", "matched on", "side"],
             rows.Count == 0 ? [["(nothing could be joined)", "-", "-", "-", "-", "-", "-"]] : rows);
     }
@@ -387,7 +387,7 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         }
 
         return new ProbeTable(
-            "What could not be joined, and why",
+            "What the subtraction left out, and why",
             ["path", "side", "kind", "principal", "grant", "why"],
             rows.Count == 0 ? [["(every row on both sides carried a key)", "-", "-", "-", "-", "-"]] : rows);
     }
@@ -456,10 +456,10 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
             .ToList();
 
         var observed = missing.Count == 0 && extra.Count == 0
-            ? $"across {compared.Count} file(s), every joinable grant appeared on both sides - " +
-              "app-only Graph is not dropping anything this comparison can see"
-            : $"across {compared.Count} file(s), {missing.Count} joinable grant(s) are in SharePoint and not " +
-              $"in Graph, and {extra.Count} are in Graph and not in SharePoint";
+            ? $"across {compared.Count} file(s), every grant naming a directory principal appeared on " +
+              "both sides - app-only Graph is not dropping any of them"
+            : $"across {compared.Count} file(s), {missing.Count} grant(s) naming a directory principal are " +
+              $"in SharePoint and not in Graph, and {extra.Count} are in Graph and not in SharePoint";
 
         return Observation.Measured("is app-only being shown everything", observed) with
         {
@@ -472,9 +472,12 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
                 ["onlyInGraph"] = extra.Count == 0
                     ? "(none)"
                     : string.Join("; ", extra.Select(e => $"{e.Path}: {e.p.Kind} {e.p.Name}")),
-                ["note"] = "sharing links are excluded from this count - see the unjoinable table. " +
-                           "'nothing missing' therefore means nothing missing among the grants that " +
-                           "could be keyed, which is not the same as nothing missing",
+                ["note"] = "rows only one of the two APIs models are excluded from this count and " +
+                           "listed in the table below with the reason: sharing links (Graph returns " +
+                           "them as 'link' entries, SharePoint as backing groups, and the two cannot " +
+                           "be joined) and SharePoint's own Limited Access bookkeeping groups. Run 99 " +
+                           "counted seven of those as missing from Graph, which was wrong - none of " +
+                           "them is a grant Graph failed to return",
             },
         };
     }
