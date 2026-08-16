@@ -232,6 +232,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
 
         report.Add(BuildAcceptanceTable(legs));
         report.Add(BuildEffectTable(legs));
+        report.Add(BuildChangeTable(legs, options.Bookmark is not null));
         report.Add(BuildShapeTable(legs));
         report.Add(BuildCarrierTable(legs));
         report.Add(BuildCallTable(calls));
@@ -467,6 +468,47 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             $"{onlyWithout.Count} only without, {both.Count} in both)",
             ["key", "without header", "with header", "side"],
             rows.Count == 0 ? [["(neither leg returned an item)", "-", "-", "-"]] : rows);
+    }
+
+    /// <summary>
+    /// What actually came back, named. With a bookmark this is the whole point of the run - "two
+    /// items changed" cannot be checked against the library, and whether the thing that was moved is
+    /// even among them decides whether a header that added nothing was given anything to add it to.
+    /// <para>
+    /// Only shown for a bookmarked run. A full enumeration lists the library, which is a different
+    /// document and a longer one.
+    /// </para>
+    /// </summary>
+    private static ProbeTable BuildChangeTable(IReadOnlyList<Leg> legs, bool hasBookmark)
+    {
+        var baseline = legs[0];
+
+        if (!hasBookmark)
+        {
+            return new ProbeTable(
+                "What moved since the bookmark",
+                ["item", "path", "kind"],
+                [["(no bookmark - this run listed the library rather than what changed)", "-", "-"]]);
+        }
+
+        var rows = baseline.Items
+            .Select(i => (IReadOnlyList<string?>)new[]
+            {
+                i.Name,
+                i.Path,
+                // Taken from the item's own keys rather than guessed from the name: a delta entry for
+                // something removed carries a 'deleted' facet, and a folder carries 'folder'.
+                i.Keys.Contains("deleted") ? "deleted"
+                    : i.Keys.Contains("folder") ? "folder"
+                    : i.Keys.Contains("file") ? "file"
+                    : "neither file nor folder",
+            })
+            .ToList();
+
+        return new ProbeTable(
+            $"What moved since the bookmark ({baseline.Items.Count} in the baseline leg)",
+            ["item", "path", "kind"],
+            rows.Count == 0 ? [["(nothing had moved)", "-", "-"]] : rows);
     }
 
     /// <summary>
