@@ -36,17 +36,24 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string DeltaCommand = "delta";
 
+    /// <summary>
+    /// Whether an app-only reading of <c>driveItem/permissions</c> is being shown everything. The
+    /// collection is documented as filtered by who is asking, without saying which side of that an
+    /// app-only caller falls on, so it takes a second reading of the same item to answer.
+    /// </summary>
+    public const string PermissionsCommand = "permissions";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
-        InventoryCommand, PromotionCommand, DeltaCommand,
+        InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
     private static readonly string[] NeedsApp =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
-        PromotionCommand, DeltaCommand,
+        PromotionCommand, DeltaCommand, PermissionsCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -71,13 +78,15 @@ public static class ProbeOptionsLoader
     private static readonly string[] InventoryOnly = [InventoryCommand];
 
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
-    private static readonly string[] SiteReaders = [InventoryCommand, PromotionCommand, DeltaCommand];
+    private static readonly string[] SiteReaders =
+        [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
     /// run with none configured has nothing to compare.
     /// </summary>
-    private static readonly string[] NeedsFilePaths = [AccessCommand, PromotionCommand];
+    private static readonly string[] NeedsFilePaths =
+        [AccessCommand, PromotionCommand, PermissionsCommand];
 
     private static readonly string[] AclOnly = [AclCommand];
 
