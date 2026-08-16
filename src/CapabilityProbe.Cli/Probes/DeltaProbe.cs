@@ -81,6 +81,13 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         ("deltashowsharingchanges", "documented for this route - the nearest neighbour to the one under test"),
         ("deltatraversepermissiongaps", "documented for this route"),
 
+        // The pair the service itself asked for. Run #91 refused deltatraversepermissiongaps with
+        // "Must also prefer deltashowremovedasdeleted when preferring deltatraversepermissiongaps" -
+        // so this is the one leg sent on the route's own stated terms rather than on a guess, and the
+        // only place in this run where an accepted preference could be expected to say so.
+        ("deltashowremovedasdeleted, deltatraversepermissiongaps",
+            "the pair the service asked for when it refused one of them alone"),
+
         // Graph-wide rather than route-specific: a different way for an echo to be reachable.
         ("include-unknown-enum-members", "documented across Graph rather than for this route"),
 
