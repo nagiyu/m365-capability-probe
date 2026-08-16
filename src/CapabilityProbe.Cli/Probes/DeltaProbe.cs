@@ -502,13 +502,18 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
                     : i.Keys.Contains("folder") ? "folder"
                     : i.Keys.Contains("file") ? "file"
                     : "neither file nor folder",
+
+                // The one facet this whole subcommand is about, printed per item rather than counted.
+                // 'shared' appears in the key list either way, because that list is the union across
+                // items - so the union cannot answer "does the item that changed carry it".
+                Facet(i.Raw, "shared"),
             })
             .ToList();
 
         return new ProbeTable(
             $"What moved since the bookmark ({baseline.Items.Count} in the baseline leg)",
-            ["item", "path", "kind"],
-            rows.Count == 0 ? [["(nothing had moved)", "-", "-"]] : rows);
+            ["item", "path", "kind", "shared (baseline leg, no header)"],
+            rows.Count == 0 ? [["(nothing had moved)", "-", "-", "-"]] : rows);
     }
 
     /// <summary>
@@ -835,6 +840,16 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
 
         return null;
     }
+
+    /// <summary>
+    /// One facet of an item, printed as the service wrote it. Absent is reported as absent rather
+    /// than as an empty value - across this repository those two have turned out to be different
+    /// answers more often than not.
+    /// </summary>
+    private static string Facet(JsonElement item, string property) =>
+        item.TryGetProperty(property, out var facet)
+            ? facet.GetRawText()
+            : "(the key is not on this item)";
 
     private static string? Link(JsonElement root, string property) =>
         root.TryGetProperty(property, out var link) &&
