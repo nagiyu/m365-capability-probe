@@ -205,6 +205,54 @@ public sealed class ProbeOptions
         int.TryParse(PageLimit.Trim(), out var value) && value > 0 ? value : DefaultPageLimit;
 
     /// <summary>
+    /// A delta bookmark, used only by <c>delta</c>. Empty means a full enumeration.
+    /// <para>
+    /// This is not an access token and grants nothing. It is the <c>token</c> query value out of the
+    /// <c>@odata.deltaLink</c> a previous run ended with, and it names a drive and a moment: supplied,
+    /// the same call answers "what changed since then" instead of "what is there". Findings 19 and 20
+    /// were measured entirely without one, which is why the preferences about removals and sharing
+    /// changes had nothing to act on - a full enumeration has no changes in it.
+    /// </para>
+    /// <para>
+    /// It is a run's input rather than a stored setting for the same reason the file paths are: which
+    /// moment a run is measured against is what that run is about.
+    /// </para>
+    /// </summary>
+    public string DeltaToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The bookmark for this run, or null for a full enumeration.
+    /// <para>
+    /// The whole <c>@odata.deltaLink</c> is accepted as well as the bare token, because that is what
+    /// is on the clipboard after reading a previous report - and a tool that answers a pasted link
+    /// with "missing DeltaToken" is blaming the reader for the shape of its own output. The same
+    /// lesson as the separator: accept both forms rather than be right about one.
+    /// </para>
+    /// </summary>
+    public string? Bookmark
+    {
+        get
+        {
+            var value = DeltaToken.Trim();
+            if (value.Length == 0)
+            {
+                return null;
+            }
+
+            var marker = value.IndexOf("token=", StringComparison.OrdinalIgnoreCase);
+            if (marker < 0)
+            {
+                return value;
+            }
+
+            var rest = value[(marker + "token=".Length)..];
+            var end = rest.IndexOf('&');
+            var token = end < 0 ? rest : rest[..end];
+            return Uri.UnescapeDataString(token);
+        }
+    }
+
+    /// <summary>
     /// Application (client) ID of a <em>second</em> app registration, used only by <c>inventory</c>.
     /// <para>
     /// Empty, <c>inventory</c> falls back to the probe's own registration and reports that it did.

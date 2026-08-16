@@ -126,6 +126,13 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
 
         public bool SawDeltaLink { get; set; }
 
+        /// <summary>
+        /// The bookmark this leg ended on, taken out of the final <c>@odata.deltaLink</c>. Printed so
+        /// the next run can be asked "what changed since here" - which is the only way the
+        /// preferences about removals and sharing changes have anything to act on.
+        /// </summary>
+        public string? EndedOn { get; set; }
+
         /// <summary>Every property name any item in this leg carried.</summary>
         public HashSet<string> Keys { get; } = new(StringComparer.Ordinal);
     }
@@ -139,6 +146,13 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         report.Subject["site"] = options.SiteUrl;
         report.Subject["speaking as"] = app.Label;
         report.Subject["header under test"] = $"{PreferenceName}: {PreferenceValue}";
+
+        // Printed first because it changes what every number below means. 18 items from a full
+        // enumeration and 18 items since a bookmark are not the same measurement, and a reader
+        // comparing two runs has no other way to tell which is which.
+        report.Subject["asking"] = options.Bookmark is null
+            ? "what is there - a full enumeration, no bookmark given"
+            : "what moved since a bookmark - counts below are changes, not contents";
         report.Subject["sent beside it"] = $"{Controls.Length} controls - {string.Join(", ", Controls.Select(c => c.Value))}";
 
         var source = AppOnlyTokenSource.WithCertificate(options, app);
@@ -231,6 +245,18 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             report.Quote($"What {leg.Name} was refused with", leg.RefusalBody!);
         }
 
+        // The bookmark the baseline ended on, printed whole so it can be handed back as the next
+        // run's input. Not a credential - it grants nothing on its own - but it does name a drive
+        // and a moment, and it is long enough that a clipped copy would silently ask a different
+        // question. Only the baseline's is offered: a bookmark taken from a leg that sent a header
+        // would carry that leg's terms into the next run without saying so.
+        if (legs[0].EndedOn is { } bookmark)
+        {
+            report.Quote(
+                "The bookmark the baseline ended on - pass it back as DeltaToken to ask what moved since here",
+                bookmark);
+        }
+
         foreach (var leg in legs)
         {
             report.Add(LegObservation(leg));
@@ -240,6 +266,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         report.Add(EchoObservation(legs));
         report.Add(InventedComparison(legs));
         report.Add(DifferenceObservation(legs));
+        report.Add(ReachObservation(options.Bookmark is not null));
         report.Finish();
         return report;
     }
@@ -260,7 +287,13 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             ? new[] { (PreferenceName, leg.Preference) }
             : null;
 
-        string? next = $"{GraphBase}/sites/{siteId}/drive/root/delta";
+        // With a bookmark the same call answers a different question: what moved since that moment,
+        // rather than what is there. Every leg gets the same one, so the legs still differ only by
+        // their header.
+        string? next = options.Bookmark is { } bookmark
+            ? $"{GraphBase}/sites/{siteId}/drive/root/delta?token={Uri.EscapeDataString(bookmark)}"
+            : $"{GraphBase}/sites/{siteId}/drive/root/delta";
+
         var limit = options.PagesToFollow > 0 ? options.PagesToFollow : DefaultPages;
 
         while (next is not null)
@@ -315,7 +348,13 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
                     entry.Clone()));
             }
 
-            leg.SawDeltaLink |= root.Value.TryGetProperty("@odata.deltaLink", out _);
+            var deltaLink = Link(root.Value, "@odata.deltaLink");
+            if (deltaLink is not null)
+            {
+                leg.SawDeltaLink = true;
+                leg.EndedOn = TokenIn(deltaLink);
+            }
+
             next = Link(root.Value, "@odata.nextLink");
 
             if (next is not null && leg.Pages >= limit)
@@ -649,6 +688,32 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         };
     }
 
+    /// <summary>
+    /// What this run's shape puts out of reach, said in the run rather than left to a reader. Half
+    /// the preferences under test are about change - removals, sharing changes - and a full
+    /// enumeration contains no change at all. "It did nothing" and "it had nothing to do" produce
+    /// the same table, so which of the two a run could even distinguish belongs in the report.
+    /// </summary>
+    private static Observation ReachObservation(bool hasBookmark) =>
+        Observation.Measured(
+            "what this run's shape could tell apart",
+            hasBookmark
+                ? "a bookmark was given, so the response is the changes since that moment - a " +
+                  "preference about removals or sharing changes had something it could act on, and " +
+                  "a leg that matched the baseline anyway did so with changes available to show"
+                : "no bookmark, so this was a full enumeration - it contains no removals and no " +
+                  "sharing changes, and a preference about either had nothing to act on. A leg that " +
+                  "matched the baseline here has not been shown to do nothing") with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["bookmark"] = hasBookmark.ToString(),
+                ["note"] = "the bookmark this run ended on is quoted above; passing it back as " +
+                           "DeltaToken, after something in the library has moved, is what turns " +
+                           "'no difference' into evidence",
+            },
+        };
+
     private static Observation DifferenceObservation(IReadOnlyList<Leg> legs)
     {
         if (legs[0].RefusalBody is not null || legs[1].RefusalBody is not null)
@@ -703,6 +768,31 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         entry.TryGetProperty("parentReference", out var parent) && parent.ValueKind == JsonValueKind.Object
             ? Text(parent, "path") ?? "(no path)"
             : "(no parentReference)";
+
+    /// <summary>
+    /// The <c>token</c> query value out of a deltaLink. Parsed here rather than with a URI helper so
+    /// the value is taken exactly as the service wrote it - a bookmark that has been re-encoded on
+    /// the way through would answer a different question, or none.
+    /// </summary>
+    private static string? TokenIn(string deltaLink)
+    {
+        var query = deltaLink.IndexOf('?');
+        if (query < 0)
+        {
+            return null;
+        }
+
+        foreach (var pair in deltaLink[(query + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var equals = pair.IndexOf('=');
+            if (equals > 0 && pair[..equals].Equals("token", StringComparison.OrdinalIgnoreCase))
+            {
+                return Uri.UnescapeDataString(pair[(equals + 1)..]);
+            }
+        }
+
+        return null;
+    }
 
     private static string? Link(JsonElement root, string property) =>
         root.TryGetProperty(property, out var link) &&

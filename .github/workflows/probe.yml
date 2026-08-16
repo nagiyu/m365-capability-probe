@@ -56,13 +56,16 @@ on:
         type: string
         required: false
         default: ""
-      page_size:
-        description: "acl only, optional. $top for every collection. Set it small (e.g. 2) to make a library too small to page on its own page anyway. Empty takes whatever the service calls a page."
+      # Two settings in one field because a dispatch form takes ten inputs and no more. They are
+      # the acl-only pair and they are always read together, so this is the join that costs least.
+      # The step below splits it; the tool still takes PageSize and PageLimit separately.
+      paging:
+        description: "acl only, optional. 'size|limit'. size is $top for every collection - set it small (e.g. 2) to make a library page even when it is too small to. limit is how many pages a route may follow; reaching it is reported as reaching it, never as the end of the collection. Empty means the service's own page size and 20 pages. '2' alone sets size only, '|5' sets limit only."
         type: string
         required: false
         default: ""
-      page_limit:
-        description: "acl only, optional. How many pages a route may follow before stopping. Reaching it is reported as reaching it, never as the end of the collection. Empty means 20."
+      delta_token:
+        description: "delta only, optional. The bookmark a previous delta run ended on - the whole @odata.deltaLink is fine, or just the token out of it. Given, the run reports what moved since that moment instead of everything there. Without one there are no removals and no sharing changes in the response, so the preferences about those have nothing to act on."
         type: string
         required: false
         default: ""
@@ -211,12 +214,23 @@ jobs:
           PROBE_PROTECTEDSITEFILES: ${{ inputs.protected_site_files }}
           PROBE_INVENTORYCLIENTID: ${{ secrets.PROBE_INVENTORYCLIENTID }}
           PROBE_INVENTORYCERTIFICATEPASSWORD: ${{ secrets.PROBE_INVENTORYCERTIFICATEPASSWORD }}
-          PROBE_PAGESIZE: ${{ inputs.page_size }}
-          PROBE_PAGELIMIT: ${{ inputs.page_limit }}
+          PROBE_DELTATOKEN: ${{ inputs.delta_token }}
+          # Split below rather than bound here: the form has one field for the pair, the tool has two.
+          PAGING: ${{ inputs.paging }}
           # Not PROBE_-prefixed: that prefix is the configuration binder's, and this is not a setting.
           SUBCOMMAND: ${{ inputs.subcommand }}
         run: |
           set -u
+
+          # 'size|limit'. Either half may be empty, and an empty half means the tool's own default -
+          # the same as leaving the whole field alone. Exported rather than passed on the command
+          # line so a value with a shell character in it cannot become part of the command.
+          export PROBE_PAGESIZE="${PAGING%%|*}"
+          case "$PAGING" in
+            *\|*) export PROBE_PAGELIMIT="${PAGING#*|}" ;;
+            *)    export PROBE_PAGELIMIT="" ;;
+          esac
+
           status=0
           dotnet run --project src/CapabilityProbe.Cli -c Release --no-build -- "$SUBCOMMAND" || status=$?
 
