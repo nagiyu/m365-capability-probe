@@ -174,9 +174,12 @@ public static class Program
         writer.WriteLine("              so the difference between rows is how each file was made, not when");
         writer.WriteLine("              it was measured");
         writer.WriteLine("  delta       what 'Prefer: hierarchicalsharing' does to a drive's delta, and what it");
-        writer.WriteLine("              costs. two legs in one run - the same call with and without the header -");
-        writer.WriteLine("              and the two key sets are subtracted rather than searched, so whatever the");
-        writer.WriteLine("              header adds appears because it arrived, not because it was looked for"); 
+        writer.WriteLine("              costs. the same call is walked once with nothing, once with the header,");
+        writer.WriteLine("              and once with each of six controls, all in one run. the key sets are");
+        writer.WriteLine("              subtracted rather than searched, so whatever the header adds appears");
+        writer.WriteLine("              because it arrived and not because it was looked for - and the controls");
+        writer.WriteLine("              are what tell 'the service ignored it' apart from 'this route never says");
+        writer.WriteLine("              anything about preferences', which one leg on its own cannot");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

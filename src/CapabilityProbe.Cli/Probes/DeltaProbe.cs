@@ -19,11 +19,19 @@ namespace CapabilityProbe.Probes;
 /// about this header and not about that one.
 /// </para>
 /// <para>
-/// Two legs in one run: the same call, once without the header and once with it. Everything else -
-/// the token, the drive, the minute - is held still, so a difference between the legs is the header.
-/// Swapping the app's SharePoint grant between runs is what splits the permission question, and the
-/// roles each token actually carries are printed so the two runs label themselves rather than
-/// relying on anyone's memory of which one was which.
+/// Several legs in one run: the same call, once with nothing, once with the header under test, and
+/// once with each of a set of controls. Everything else - the token, the drive, the minute - is held
+/// still, so a difference between the legs is the header. Swapping the app's SharePoint grant between
+/// runs is what splits the permission question, and the roles each token actually carries are printed
+/// so the two runs label themselves rather than relying on anyone's memory of which one was which.
+/// </para>
+/// <para>
+/// The controls are there because of what finding 19 could not settle. Three runs returned
+/// <c>200 OK</c> with no <c>Preference-Applied</c>, which is what a preference being ignored looks
+/// like - and also what a route that never echoes anything looks like. One leg cannot tell those
+/// apart. Sending preferences whose fate is knowable alongside it can: a preference that visibly
+/// changes the response proves the route acts on some of them, and a preference invented here proves
+/// the echo means something when it does arrive.
 /// </para>
 /// </summary>
 public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextWriter console)
@@ -44,12 +52,55 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
     /// </summary>
     private const int DefaultPages = 20;
 
+    /// <summary>
+    /// The page size the OData control asks for. Small enough that a library of any size splits, so
+    /// "it was applied" is visible as a page count rather than only as an echoed header.
+    /// </summary>
+    private const int ControlPageSize = 5;
+
+    /// <summary>
+    /// A preference made up for this run. Nothing can recognise it, so an echo of it would mean the
+    /// echo is not evidence of anything - which is worth knowing before reading the other rows.
+    /// </summary>
+    private const string InventedPreference = "no-such-preference-e3f1";
+
+    /// <summary>
+    /// The preferences sent beside the one under test, and why each is here. None of them is expected
+    /// to do anything in particular - they are here so that the answer for
+    /// <c>hierarchicalsharing</c> has something to be read against.
+    /// </summary>
+    private static readonly (string Value, string Why)[] Controls =
+    [
+        // The one control whose fate can be read without trusting the echo at all: if the service
+        // applies it, the walk takes more pages, and a page count is not something a header can hide.
+        ($"odata.maxpagesize={ControlPageSize}",
+            "standard OData - if applied, the page count moves, echo or no echo"),
+
+        // Documented on this exact route, so if the route echoes anything it should echo these.
+        ("deltashowremovedasdeleted", "documented for this route"),
+        ("deltashowsharingchanges", "documented for this route - the nearest neighbour to the one under test"),
+        ("deltatraversepermissiongaps", "documented for this route"),
+
+        // Graph-wide rather than route-specific: a different way for an echo to be reachable.
+        ("include-unknown-enum-members", "documented across Graph rather than for this route"),
+
+        // Invented here. If this comes back echoed, an echo says nothing about whether a preference
+        // was understood, and every other row in the table loses its meaning.
+        (InventedPreference, "invented for this run - nothing should recognise it"),
+    ];
+
     private sealed record Item(string Id, string Name, string Path, IReadOnlyList<string> Keys, JsonElement Raw);
 
     private sealed record Leg
     {
         public required string Name { get; init; }
         public required bool SendsHeader { get; init; }
+
+        /// <summary>What this leg is in the run for, printed beside it so no row needs explaining.</summary>
+        public required string Purpose { get; init; }
+
+        /// <summary>The preference value sent, or null for the baseline.</summary>
+        public string? Preference { get; init; }
 
         public List<Item> Items { get; } = [];
 
@@ -81,6 +132,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         report.Subject["site"] = options.SiteUrl;
         report.Subject["speaking as"] = app.Label;
         report.Subject["header under test"] = $"{PreferenceName}: {PreferenceValue}";
+        report.Subject["sent beside it"] = $"{Controls.Length} controls - {string.Join(", ", Controls.Select(c => c.Value))}";
 
         var source = AppOnlyTokenSource.WithCertificate(options, app);
         if (source.IsUnavailable)
@@ -127,11 +179,27 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             return report;
         }
 
+        // Order matters only in that the baseline is first and the header under test second: the two
+        // comparisons finding 19 was built on stay where they were, and the controls are added after.
         var legs = new List<Leg>
         {
-            new() { Name = "no header", SendsHeader = false },
-            new() { Name = $"{PreferenceName}: {PreferenceValue}", SendsHeader = true },
+            new() { Name = "no header", SendsHeader = false, Purpose = "the baseline" },
+            new()
+            {
+                Name = $"{PreferenceName}: {PreferenceValue}",
+                SendsHeader = true,
+                Preference = PreferenceValue,
+                Purpose = "the one under test",
+            },
         };
+
+        legs.AddRange(Controls.Select(c => new Leg
+        {
+            Name = $"{PreferenceName}: {c.Value}",
+            SendsHeader = true,
+            Preference = c.Value,
+            Purpose = c.Why,
+        }));
 
         foreach (var leg in legs)
         {
@@ -142,6 +210,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         report.Subject["throttling"] = caller.Record.Summary;
 
         report.Add(BuildAcceptanceTable(legs));
+        report.Add(BuildEffectTable(legs));
         report.Add(BuildShapeTable(legs));
         report.Add(BuildCarrierTable(legs));
         report.Add(BuildCallTable(calls));
@@ -152,6 +221,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         }
 
         report.Add(AcceptanceObservation(legs));
+        report.Add(EchoObservation(legs));
         report.Add(DifferenceObservation(legs));
         report.Finish();
         return report;
@@ -169,8 +239,8 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         List<HttpObservation> calls,
         CancellationToken cancellationToken)
     {
-        var headers = leg.SendsHeader
-            ? new[] { (PreferenceName, PreferenceValue) }
+        var headers = leg.SendsHeader && leg.Preference is not null
+            ? new[] { (PreferenceName, leg.Preference) }
             : null;
 
         string? next = $"{GraphBase}/sites/{siteId}/drive/root/delta";
@@ -250,17 +320,55 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
     /// </summary>
     private static ProbeTable BuildAcceptanceTable(IReadOnlyList<Leg> legs) =>
         new("Was the header taken",
-            ["leg", "first status", "Preference-Applied", "pages", "items", "how it ended", "refusal body"],
+            ["leg", "what it is for", "first status", "Preference-Applied", "refusal body"],
             legs.Select(l => (IReadOnlyList<string?>)new[]
             {
                 l.Name,
+                l.Purpose,
                 l.FirstStatus ?? "never asked",
                 l.PreferenceApplied ?? (l.SendsHeader ? "the service said nothing" : "-"),
-                l.Pages.ToString(),
-                l.Items.Count.ToString(),
-                l.Stopped ?? "-",
                 l.RefusalBody ?? "-",
             }).ToList());
+
+    /// <summary>
+    /// What each leg actually came back with, measured against the baseline. This is the half of the
+    /// answer that does not depend on the service echoing anything: a preference that was acted on has
+    /// to show up as a different page count, a different number of items, or a different set of keys.
+    /// </summary>
+    private static ProbeTable BuildEffectTable(IReadOnlyList<Leg> legs)
+    {
+        var baseline = legs[0];
+
+        var rows = legs.Select(l =>
+        {
+            var extra = l.Keys.Except(baseline.Keys).OrderBy(k => k, StringComparer.Ordinal).ToList();
+            var missing = baseline.Keys.Except(l.Keys).OrderBy(k => k, StringComparer.Ordinal).ToList();
+
+            var moved = ReferenceEquals(l, baseline)
+                ? "-"
+                : l.Pages != baseline.Pages || l.Items.Count != baseline.Items.Count ||
+                  extra.Count > 0 || missing.Count > 0
+                    ? "yes"
+                    : "no";
+
+            return (IReadOnlyList<string?>)new[]
+            {
+                l.Name,
+                l.Pages.ToString(),
+                l.Items.Count.ToString(),
+                l.Keys.Count.ToString(),
+                extra.Count == 0 ? "-" : string.Join(", ", extra),
+                missing.Count == 0 ? "-" : string.Join(", ", missing),
+                moved,
+                l.Stopped ?? "-",
+            };
+        }).ToList();
+
+        return new ProbeTable(
+            "What each leg came back with, against the baseline",
+            ["leg", "pages", "items", "keys", "keys the baseline lacked", "keys it lost", "moved", "how it ended"],
+            rows);
+    }
 
     /// <summary>
     /// What the two legs' items are made of, as a set difference rather than a search.
@@ -273,12 +381,8 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
     /// </summary>
     private static ProbeTable BuildShapeTable(IReadOnlyList<Leg> legs)
     {
-        if (legs.Count != 2)
-        {
-            return new ProbeTable("What the header changed about the shape", ["side", "keys"],
-                [["(a comparison needs exactly two legs)", "-"]]);
-        }
-
+        // The baseline against the one under test. The controls have their own table; putting eight
+        // legs into this one would make the column that matters the narrowest one on the page.
         var without = legs[0].Keys;
         var with = legs[1].Keys;
 
@@ -316,12 +420,6 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
     /// </summary>
     private static ProbeTable BuildCarrierTable(IReadOnlyList<Leg> legs)
     {
-        if (legs.Count != 2)
-        {
-            return new ProbeTable("Which items carry what the header added", ["item", "path", "carries"],
-                [["(a comparison needs exactly two legs)", "-", "-"]]);
-        }
-
         var added = legs[1].Keys.Except(legs[0].Keys).ToHashSet(StringComparer.Ordinal);
         if (added.Count == 0)
         {
@@ -365,6 +463,8 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         {
             Details = new Dictionary<string, string?>
             {
+                ["preference"] = leg.Preference ?? "(none)",
+                ["purpose"] = leg.Purpose,
                 ["sentHeader"] = leg.SendsHeader.ToString(),
                 ["firstStatus"] = leg.FirstStatus,
                 ["preferenceApplied"] = leg.PreferenceApplied,
@@ -379,7 +479,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
 
     private static Observation AcceptanceObservation(IReadOnlyList<Leg> legs)
     {
-        var withHeader = legs.FirstOrDefault(l => l.SendsHeader);
+        var withHeader = legs.FirstOrDefault(l => l.Preference == PreferenceValue);
         if (withHeader is null)
         {
             return Observation.NotRun("was the header taken", "no leg sent it");
@@ -408,13 +508,65 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         };
     }
 
+    /// <summary>
+    /// The question finding 19 left open: silence about a preference and a route that never speaks
+    /// about preferences look identical from one leg. Several legs can separate them - but only in one
+    /// direction each, so all three outcomes are named rather than folded into a verdict.
+    /// </summary>
+    private static Observation EchoObservation(IReadOnlyList<Leg> legs)
+    {
+        var sent = legs.Where(l => l.Preference is not null).ToList();
+        if (sent.Count == 0)
+        {
+            return Observation.NotRun("does this route echo Preference-Applied at all", "no leg sent a preference");
+        }
+
+        var echoed = sent.Where(l => l.PreferenceApplied is not null).ToList();
+        var baseline = legs[0];
+        var acted = sent
+            .Where(l => l.Pages != baseline.Pages || l.Items.Count != baseline.Items.Count ||
+                        !l.Keys.SetEquals(baseline.Keys))
+            .ToList();
+
+        var invented = sent.FirstOrDefault(l => l.Preference == InventedPreference);
+        var inventedEchoed = invented?.PreferenceApplied is not null;
+
+        var observed = echoed.Count == 0
+            ? $"no - none of the {sent.Count} preferences sent came back echoed, so this route's silence " +
+              $"about {PreferenceValue} does not distinguish 'ignored' from 'never echoes anything'" +
+              (acted.Count == 0
+                  ? ". And none of them changed the response either, so nothing here shows the route " +
+                    "acting on a preference at all"
+                  : $". But {acted.Count} of them did change the response ({string.Join(", ", acted.Select(l => l.Preference))}), " +
+                    "so the route acts on preferences without saying so - which makes the echo useless as evidence here")
+            : inventedEchoed
+                ? $"yes, but it echoed the invented one too - an echo says nothing about whether a " +
+                  $"preference was understood. {echoed.Count} of {sent.Count} came back echoed"
+                : $"yes - {echoed.Count} of {sent.Count} came back echoed " +
+                  $"({string.Join(", ", echoed.Select(l => l.Preference))}), and the invented one did not. " +
+                  $"So this route does echo, and it said nothing about {PreferenceValue}";
+
+        return Observation.Measured("does this route echo Preference-Applied at all", observed) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["preferencesSent"] = string.Join(", ", sent.Select(l => l.Preference)),
+                ["echoed"] = echoed.Count == 0 ? "(none)" : string.Join(", ", echoed.Select(l => $"{l.Preference} -> {l.PreferenceApplied}")),
+                ["changedTheResponse"] = acted.Count == 0 ? "(none)" : string.Join(", ", acted.Select(l => l.Preference)),
+                ["inventedPreferenceEchoed"] = invented is null ? "(not sent)" : inventedEchoed.ToString(),
+                ["note"] = "the echo and the effect are separate evidence. a preference can be applied " +
+                           "without being echoed, and this run measures both rather than choosing one",
+            },
+        };
+    }
+
     private static Observation DifferenceObservation(IReadOnlyList<Leg> legs)
     {
-        if (legs.Count != 2 || legs.Any(l => l.RefusalBody is not null))
+        if (legs[0].RefusalBody is not null || legs[1].RefusalBody is not null)
         {
             return Observation.NotRun(
                 "what the header changed",
-                "one of the legs did not come back, so there was nothing to compare");
+                "one of the two compared legs did not come back, so there was nothing to compare");
         }
 
         var added = legs[1].Keys.Except(legs[0].Keys).OrderBy(k => k, StringComparer.Ordinal).ToList();
