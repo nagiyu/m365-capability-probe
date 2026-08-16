@@ -215,6 +215,15 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
         report.Add(BuildCarrierTable(legs));
         report.Add(BuildCallTable(calls));
 
+        // Outside the grid. A refusal is answered by what the service said, and the table clips at the
+        // column width - run #90 printed 'Must also prefer deltashowremo...' and left the reader to
+        // finish the sentence from memory, which is the exact move this investigation has recorded
+        // going wrong four times.
+        foreach (var leg in legs.Where(l => l.RefusalBody is not null))
+        {
+            report.Quote($"What {leg.Name} was refused with", leg.RefusalBody!);
+        }
+
         foreach (var leg in legs)
         {
             report.Add(LegObservation(leg));
@@ -222,6 +231,7 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
 
         report.Add(AcceptanceObservation(legs));
         report.Add(EchoObservation(legs));
+        report.Add(InventedComparison(legs));
         report.Add(DifferenceObservation(legs));
         report.Finish();
         return report;
@@ -521,26 +531,35 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             return Observation.NotRun("does this route echo Preference-Applied at all", "no leg sent a preference");
         }
 
-        var echoed = sent.Where(l => l.PreferenceApplied is not null).ToList();
         var baseline = legs[0];
+        var echoed = sent.Where(l => l.PreferenceApplied is not null).ToList();
+        var refused = sent.Where(l => l.RefusalBody is not null).ToList();
+
+        // A refusal is not an effect: the leg came back empty because it never ran, not because the
+        // preference reshaped the answer. Kept apart so "the route acts on preferences" is not
+        // claimed on the strength of a 400.
         var acted = sent
-            .Where(l => l.Pages != baseline.Pages || l.Items.Count != baseline.Items.Count ||
-                        !l.Keys.SetEquals(baseline.Keys))
+            .Where(l => l.RefusalBody is null &&
+                        (l.Pages != baseline.Pages || l.Items.Count != baseline.Items.Count ||
+                         !l.Keys.SetEquals(baseline.Keys)))
             .ToList();
 
         var invented = sent.FirstOrDefault(l => l.Preference == InventedPreference);
         var inventedEchoed = invented?.PreferenceApplied is not null;
 
         var observed = echoed.Count == 0
-            ? $"no - none of the {sent.Count} preferences sent came back echoed, so this route's silence " +
-              $"about {PreferenceValue} does not distinguish 'ignored' from 'never echoes anything'" +
-              (acted.Count == 0
-                  ? ". And none of them changed the response either, so nothing here shows the route " +
-                    "acting on a preference at all"
-                  : $". But {acted.Count} of them did change the response ({string.Join(", ", acted.Select(l => l.Preference))}), " +
-                    "so the route acts on preferences without saying so - which makes the echo useless as evidence here")
+            ? $"no - none of the {sent.Count} preferences sent came back echoed" +
+              (refused.Count > 0
+                  ? $", including the {refused.Count} it refused outright " +
+                    $"({string.Join(", ", refused.Select(l => l.Preference))}). So the route does read this " +
+                    "header - it can object to what is in it - and still never says which preferences it applied"
+                  : $". Nothing here shows the route reading the header at all") +
+              (acted.Count > 0
+                  ? $". {acted.Count} preference(s) changed the response without being echoed " +
+                    $"({string.Join(", ", acted.Select(l => l.Preference))})"
+                  : ". And no preference that came back changed the response")
             : inventedEchoed
-                ? $"yes, but it echoed the invented one too - an echo says nothing about whether a " +
+                ? "yes, but it echoed the invented one too - an echo says nothing about whether a " +
                   $"preference was understood. {echoed.Count} of {sent.Count} came back echoed"
                 : $"yes - {echoed.Count} of {sent.Count} came back echoed " +
                   $"({string.Join(", ", echoed.Select(l => l.Preference))}), and the invented one did not. " +
@@ -552,10 +571,73 @@ public sealed class DeltaProbe(ProbeOptions options, ProbeHttpClient http, TextW
             {
                 ["preferencesSent"] = string.Join(", ", sent.Select(l => l.Preference)),
                 ["echoed"] = echoed.Count == 0 ? "(none)" : string.Join(", ", echoed.Select(l => $"{l.Preference} -> {l.PreferenceApplied}")),
+                ["refused"] = refused.Count == 0 ? "(none)" : string.Join(", ", refused.Select(l => l.Preference)),
                 ["changedTheResponse"] = acted.Count == 0 ? "(none)" : string.Join(", ", acted.Select(l => l.Preference)),
                 ["inventedPreferenceEchoed"] = invented is null ? "(not sent)" : inventedEchoed.ToString(),
-                ["note"] = "the echo and the effect are separate evidence. a preference can be applied " +
-                           "without being echoed, and this run measures both rather than choosing one",
+                ["note"] = "the echo, the refusal and the effect are three separate pieces of evidence. " +
+                           "a preference can be applied without being echoed, and a route can read the " +
+                           "header without ever echoing - this run measures all three rather than " +
+                           "choosing one",
+            },
+        };
+    }
+
+    /// <summary>
+    /// The sharpest thing this run can say about the header under test: whether anything at all
+    /// separates it from a name invented for the occasion. If nothing does, that is the measurement -
+    /// it is not evidence that the header does not exist, only that this route treats the two alike.
+    /// </summary>
+    private static Observation InventedComparison(IReadOnlyList<Leg> legs)
+    {
+        var subject = legs.FirstOrDefault(l => l.Preference == PreferenceValue);
+        var invented = legs.FirstOrDefault(l => l.Preference == InventedPreference);
+
+        if (subject is null || invented is null)
+        {
+            return Observation.NotRun(
+                $"{PreferenceValue} against a name that does not exist",
+                "both legs are needed and one of them was not sent");
+        }
+
+        var differences = new List<string>();
+        if (subject.FirstStatus != invented.FirstStatus)
+        {
+            differences.Add($"status {subject.FirstStatus} vs {invented.FirstStatus}");
+        }
+
+        if (subject.PreferenceApplied != invented.PreferenceApplied)
+        {
+            differences.Add($"Preference-Applied {subject.PreferenceApplied ?? "(none)"} vs {invented.PreferenceApplied ?? "(none)"}");
+        }
+
+        if (subject.Items.Count != invented.Items.Count)
+        {
+            differences.Add($"{subject.Items.Count} items vs {invented.Items.Count}");
+        }
+
+        if (subject.Pages != invented.Pages)
+        {
+            differences.Add($"{subject.Pages} pages vs {invented.Pages}");
+        }
+
+        if (!subject.Keys.SetEquals(invented.Keys))
+        {
+            differences.Add("different key sets");
+        }
+
+        var observed = differences.Count == 0
+            ? $"nothing separates them - {PreferenceValue} and {InventedPreference} came back identical " +
+              "in status, echo, pages, items and keys. On this route, through this app, the documented " +
+              "name is indistinguishable from one made up for this run"
+            : $"they differ: {string.Join("; ", differences)}";
+
+        return Observation.Measured($"{PreferenceValue} against a name that does not exist", observed) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["differences"] = differences.Count == 0 ? "(none)" : string.Join("; ", differences),
+                ["note"] = "identical here means this route treats them alike, not that the header is " +
+                           "unimplemented - another route, another tenant or another grant is untested",
             },
         };
     }

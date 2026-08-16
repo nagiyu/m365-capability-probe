@@ -26,11 +26,21 @@ public sealed class ProbeReport
 
     public List<ProbeTable> Tables { get; } = [];
 
+    /// <summary>
+    /// Text that has to survive whole: a refusal body, a header, anything a reader would otherwise
+    /// have to reconstruct from memory. A table cell clips at the column width, and run #90 clipped a
+    /// service's error message mid-sentence - the one sentence the run existed to read. Anything a
+    /// finding is going to quote belongs here rather than in a cell.
+    /// </summary>
+    public List<(string Title, string Body)> Quotes { get; } = [];
+
     public List<Observation> Observations { get; } = [];
 
     public void Add(Observation observation) => Observations.Add(observation);
 
     public void Add(ProbeTable table) => Tables.Add(table);
+
+    public void Quote(string title, string body) => Quotes.Add((title, body));
 
     public void Finish() => FinishedAtUtc = DateTimeOffset.UtcNow;
 

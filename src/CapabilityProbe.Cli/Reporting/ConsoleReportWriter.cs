@@ -32,6 +32,19 @@ public sealed class ConsoleReportWriter(TextWriter writer)
             WriteGrid(table.Columns, table.Rows);
         }
 
+        // Printed outside the grid on purpose. These are the values a finding will quote, and a cell
+        // would clip them - which is how run #90 lost the second half of the only sentence it was
+        // trying to read.
+        foreach (var (title, body) in report.Quotes)
+        {
+            writer.WriteLine();
+            writer.WriteLine($"{title}, whole:");
+            foreach (var line in body.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                writer.WriteLine($"  {line}");
+            }
+        }
+
         writer.WriteLine();
         writer.WriteLine("Observations");
         WriteGrid(

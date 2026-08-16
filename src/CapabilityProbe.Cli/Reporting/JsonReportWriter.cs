@@ -35,6 +35,11 @@ public sealed class JsonReportWriter(string outputDirectory)
                 columns = t.Columns,
                 rows = t.Rows,
             }),
+            quotes = report.Quotes.Select(q => new
+            {
+                title = q.Title,
+                body = q.Body,
+            }),
             observations = report.Observations.Select(o => new
             {
                 subject = o.Subject,
