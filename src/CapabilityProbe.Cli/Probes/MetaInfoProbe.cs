@@ -201,6 +201,13 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         public string? Unique { get; init; }
 
         /// <summary>
+        /// The label's display name. Run 118 found it sitting in Graph's untrimmed bag without being
+        /// asked for - which makes it a third candidate, and one worth reporting separately: it is the
+        /// promoted column, so it can only answer for files that promoted (finding 18).
+        /// </summary>
+        public string? DisplayName { get; init; }
+
+        /// <summary>
         /// Every key the row's bag arrived with. The request asked for this rather than for a lookup:
         /// a name nobody knows cannot be searched for, so the bag is enumerated instead of queried.
         /// </summary>
@@ -567,6 +574,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         {
             Labels = metaInfo is null ? [] : SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(metaInfo)),
             Unique = unique,
+            DisplayName = First(entry, expanded, "_DisplayName") ?? First(entry, expanded, "OData__DisplayName"),
             BagKeys = bagKeys,
         };
 
@@ -645,7 +653,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
                         file.ListItemId is null
                             ? $"not looked for - {file.Unresolved ?? "no list item id"}"
                             : "the file was not among this leg's rows",
-                        "-", "-", "-", "-", "-",
+                        "-", "-", "-", "-", "-", "-",
                     ]);
                     continue;
                 }
@@ -657,6 +665,12 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
                     reading.From,
                     reading.LabelText,
                     reading.Unique ?? "(not on this row)",
+                    reading.DisplayName switch
+                    {
+                        null => "(not on this row)",
+                        "" => "(on this row, empty)",
+                        var name => name,
+                    },
                     reading.PromotedColumn ?? "(not on this row)",
                     reading.BagKeys.Count == 0 ? "(no bag)" : reading.BagKeys.Count.ToString(),
                 ]);
@@ -666,8 +680,8 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         return new ProbeTable(
             "What each leg said about each file it was asked about",
             ["file", "leg", "MetaInfo arrived", "from where", "label GUID in it",
-             "HasUniqueRoleAssignments", "_IpLabelId", "keys in the bag"],
-            rows.Count == 0 ? [["(no file was configured)", "-", "-", "-", "-", "-", "-", "-"]] : rows);
+             "HasUniqueRoleAssignments", "_DisplayName", "_IpLabelId", "keys in the bag"],
+            rows.Count == 0 ? [["(no file was configured)", "-", "-", "-", "-", "-", "-", "-", "-"]] : rows);
     }
 
     private static ProbeTable BuildCallTable(IReadOnlyList<HttpObservation> calls) =>
@@ -745,46 +759,64 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         IReadOnlyDictionary<string, Cost> costs,
         IReadOnlyList<Tracked> tracked)
     {
-        var whole = Legs.First(l => l.Api == Api.Graph && l.QuoteTheBag);
-        var cost = costs[whole.Name];
-
-        if (cost.Refusal is not null)
-        {
-            return Observation.Measured("can the enumeration move to Graph",
-                $"the untrimmed Graph leg was refused - {cost.Refusal}. The body is quoted whole above");
-        }
-
         if (tracked.Count == 0)
         {
             return Observation.NotRun("can the enumeration move to Graph",
                 "no file was configured, so no row was followed");
         }
 
-        var withLabel = tracked.Count(t => t.Readings.TryGetValue(whole.Name, out var r) && r.Labels.Count > 0);
-        var withFlag = tracked.Count(t => t.Readings.TryGetValue(whole.Name, out var r) && r.Unique is not null);
+        var whole = Legs.First(l => l.Api == Api.Graph && l.QuoteTheBag);
+        var named = Legs.First(l => l.Api == Api.Graph && !l.IsControl && !l.QuoteTheBag);
+
+        if (costs[named.Name].Refusal is { } refusal)
+        {
+            return Observation.Measured("can the enumeration move to Graph",
+                $"the named Graph leg was refused - {refusal}. The body is quoted whole above");
+        }
+
+        // Run 118 answered this from the untrimmed leg alone and printed "MetaInfo: 0 of 4" while the
+        // named leg had it for all four. The question is whether the columns can be got, not whether
+        // they arrive unasked - so the deciding numbers come from the leg that asks, and what the bag
+        // holds by default is reported beside them rather than in place of them.
+        var withLabel = Count(tracked, named, r => r.Labels.Count > 0);
+        var withFlag = Count(tracked, named, r => r.Unique is not null);
+        var byDefault = Count(tracked, whole, r => r.Labels.Count > 0);
+        var flagByDefault = Count(tracked, whole, r => r.Unique is not null);
+        var nameByDefault = Count(tracked, whole, r => !string.IsNullOrEmpty(r.DisplayName));
+
         var keys = tracked
             .Select(t => t.Readings.TryGetValue(whole.Name, out var r) ? r.BagKeys.Count : 0)
             .DefaultIfEmpty(0)
             .Max();
 
         var baseline = costs[Legs[0].Name];
+        var cost = costs[named.Name];
 
         return Observation.Measured("can the enumeration move to Graph",
-            $"MetaInfo: {withLabel} of {tracked.Count}; HasUniqueRoleAssignments: {withFlag} of " +
-            $"{tracked.Count}; the bag held up to {keys} key(s) and is quoted whole above; " +
-            $"{cost.Bytes} bytes over {cost.Pages} page(s) against SharePoint's {baseline.Bytes} " +
-            $"over {baseline.Pages}") with
+            $"named: MetaInfo {withLabel}/{tracked.Count}, HasUniqueRoleAssignments " +
+            $"{withFlag}/{tracked.Count}; unasked: {byDefault}/{tracked.Count} and " +
+            $"{flagByDefault}/{tracked.Count}, with the label's display name on " +
+            $"{nameByDefault}/{tracked.Count}; {cost.Bytes} bytes over {cost.Pages} page(s) against " +
+            $"SharePoint's {baseline.Bytes} over {baseline.Pages}") with
         {
             Details = new Dictionary<string, string?>
             {
                 ["whyItMatters"] = "SharePoint REST publishes no per-call cost and carries a separate " +
                                    "limit; Graph publishes a table. The same answer from Graph is one " +
                                    "whose cost can be worked out before the run rather than after",
+                ["theBagUnasked"] = $"up to {keys} key(s), quoted whole above",
+                ["displayNameIsThePromotedColumn"] = "the display name is what promotion writes, so it " +
+                                                     "answers only for files that promoted (finding 18). " +
+                                                     "The per-file column table says which those are",
                 ["notMeasured"] = "the published costs themselves. This run measured what arrives, " +
                                   "not what either service charges for it",
             },
         };
     }
+
+    /// <summary>How many followed files satisfied a predicate on one leg's reading.</summary>
+    private static int Count(IReadOnlyList<Tracked> tracked, Leg leg, Func<Reading, bool> predicate) =>
+        tracked.Count(t => t.Readings.TryGetValue(leg.Name, out var reading) && predicate(reading));
 
     private static Observation CostObservation(IReadOnlyDictionary<string, Cost> costs)
     {
