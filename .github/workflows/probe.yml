@@ -12,13 +12,13 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
       # for some choices. Left empty where it is needed, the probe stops and names the missing key.
       site_url:
-        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory, promotion, delta, permissions)"
+        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory, promotion, delta, permissions, metainfo)"
         type: string
         required: false
         default: ""
@@ -37,7 +37,7 @@ on:
         required: false
         default: ""
       file_paths:
-        description: "FilePaths - access, promotion and permissions. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
+        description: "FilePaths - access, promotion, permissions and metainfo. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
         type: string
         required: false
         default: ""
@@ -60,7 +60,7 @@ on:
       # the acl-only pair and they are always read together, so this is the join that costs least.
       # The step below splits it; the tool still takes PageSize and PageLimit separately.
       paging:
-        description: "acl only, optional. 'size|limit'. size is $top for every collection - set it small (e.g. 2) to make a library page even when it is too small to. limit is how many pages a route may follow; reaching it is reported as reaching it, never as the end of the collection. Empty means the service's own page size and 20 pages. '2' alone sets size only, '|5' sets limit only."
+        description: "acl and metainfo, optional. 'size|limit'. size is $top for every collection - set it small (e.g. 2) to make a library page even when it is too small to. limit is how many pages a route may follow; reaching it is reported as reaching it, never as the end of the collection. Empty means the service's own page size and 20 pages. '2' alone sets size only, '|5' sets limit only."
         type: string
         required: false
         default: ""
