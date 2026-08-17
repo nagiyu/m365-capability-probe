@@ -30,6 +30,16 @@ namespace CapabilityProbe.Probes;
 /// mention, and an empty answer that was really a question never asked would read here as "the route
 /// does not work in bulk".
 /// </para>
+/// <para>
+/// The same question is then put to Graph, whose <c>fields</c> is the same idea as SharePoint's
+/// <c>FieldValuesAsText</c>. The reason is not tidiness: SharePoint REST publishes no per-call cost
+/// and carries a limit of its own, while Graph publishes a table - so the same answer from Graph is
+/// an answer whose cost can be worked out before the run rather than after it. Two columns are at
+/// stake, <c>MetaInfo</c> and <c>HasUniqueRoleAssignments</c>, and they are reported separately
+/// because one arriving is not the other arriving. The untrimmed Graph leg has its whole bag quoted
+/// for every file followed: what is not there cannot be named, and a name nobody knows cannot be
+/// searched for.
+/// </para>
 /// </summary>
 public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, TextWriter console)
 {
@@ -49,6 +59,13 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     /// </summary>
     private const string InventedColumn = "NoSuchColumn_e3f1";
 
+    /// <summary>Which API a leg speaks to. The two are compared, so neither may be assumed.</summary>
+    private enum Api
+    {
+        SharePoint,
+        Graph,
+    }
+
     private sealed record Leg(string Name, string Query, string Why)
     {
         /// <summary>
@@ -56,6 +73,22 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         /// interesting; a control that is refused is the yardstick the candidates are read against.
         /// </summary>
         public bool IsControl { get; init; }
+
+        public Api Api { get; init; } = Api.SharePoint;
+
+        /// <summary>
+        /// Where this API puts a row's field values. SharePoint expands them under
+        /// <c>FieldValuesAsText</c>; Graph calls the same idea <c>fields</c>. The name is data rather
+        /// than a branch so that a leg reading the wrong bag is a wrong constant and not a wrong path.
+        /// </summary>
+        public string Bag => Api == Api.Graph ? "fields" : "FieldValuesAsText";
+
+        /// <summary>
+        /// True where the leg asks for the bag without trimming it, which is the only kind of leg that
+        /// can answer "what is in there" rather than "is this one thing in there". Those get the whole
+        /// bag quoted: a name nobody knows cannot be searched for.
+        /// </summary>
+        public bool QuoteTheBag { get; init; }
     }
 
     private static readonly Leg[] Legs =
@@ -102,7 +135,39 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         new($"$select={InventedColumn}", $"{Base},{InventedColumn}",
             "invented for this run - nothing should recognise it. what an unknown column is told")
             { IsControl = true },
+
+        // Graph. The reason to ask is not that it would be tidier: SharePoint REST publishes no
+        // per-call cost and carries its own separate limit, and Graph publishes a table. The same
+        // answer from Graph is an answer whose cost can be worked out in advance.
+        new("Graph: $expand=fields", "$expand=fields",
+            "the whole bag, untrimmed - the only leg that can say what is in there rather than " +
+            "whether one named thing is. The bag is quoted whole for each file followed")
+            { Api = Api.Graph, QuoteTheBag = true },
+
+        new("Graph: fields($select=the two)",
+            $"$expand=fields($select={WantedColumns})",
+            "the two columns named. Whether naming is allowed here is a different question from " +
+            "whether the values are there")
+            { Api = Api.Graph },
+
+        new("Graph: fields($select=the two + an invented name)",
+            $"$expand=fields($select={WantedColumns},{InventedColumn})",
+            "the same list with one name nothing should recognise mixed in. If this is refused and " +
+            "the leg above is not, the refusal is about the name; if both are refused the same way, " +
+            "the message says nothing (finding 24's fifteenth)")
+            { Api = Api.Graph, IsControl = true },
+
+        new($"Graph: fields($select={InventedColumn})",
+            $"$expand=fields($select={InventedColumn})",
+            "the invented name on its own, so a refusal has nothing real beside it to be about")
+            { Api = Api.Graph, IsControl = true },
     ];
+
+    /// <summary>
+    /// The two columns the enumeration currently takes from SharePoint REST: the label GUID's carrier
+    /// (finding 24) and whether the item breaks inheritance.
+    /// </summary>
+    private const string WantedColumns = "MetaInfo,HasUniqueRoleAssignments";
 
     /// <summary>One file the request is about, and what each leg managed to say about it.</summary>
     private sealed record Tracked(string Path)
@@ -131,6 +196,15 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     private sealed record Reading(string From, string? MetaInfo, string? PromotedColumn)
     {
         public IReadOnlyList<SharePointMetaInfo.Label> Labels { get; init; } = [];
+
+        /// <summary>The inheritance flag, the other column the enumeration takes from REST today.</summary>
+        public string? Unique { get; init; }
+
+        /// <summary>
+        /// Every key the row's bag arrived with. The request asked for this rather than for a lookup:
+        /// a name nobody knows cannot be searched for, so the bag is enumerated instead of queried.
+        /// </summary>
+        public IReadOnlyList<string> BagKeys { get; init; } = [];
 
         public string LabelText => Labels.Count == 0
             ? "(no label in it)"
@@ -239,13 +313,31 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             await ResolveAsync(caller, driveId, file, graph.AccessToken, calls, cancellationToken);
         }
 
+        // The same library, addressed as a list. Asked for through the drive rather than by matching a
+        // name: a library's list has a display name that a tenant may translate, and the two halves of
+        // this run have to be the same library or the comparison is between two libraries.
+        var list = driveId is null
+            ? null
+            : await caller.GetAsync($"{GraphBase}/drives/{driveId}/list?$select=id,name",
+                graph.AccessToken, cancellationToken);
+
+        if (list is not null)
+        {
+            calls.Add(list);
+        }
+
+        var listId = list is null ? null : ReadString(list, "id");
+        report.Subject["list, through Graph"] = listId ?? "never resolved - the Graph legs cannot run";
+
         var costs = new Dictionary<string, Cost>(StringComparer.Ordinal);
 
         foreach (var leg in Legs)
         {
             console.WriteLine($"Listing with {leg.Name}...");
             costs[leg.Name] = await WalkAsync(
-                caller, libraryPath, leg, tracked, sharePoint.AccessToken, calls, report, cancellationToken);
+                caller, libraryPath, siteId, listId, leg, tracked,
+                leg.Api == Api.Graph ? graph.AccessToken : sharePoint.AccessToken,
+                calls, report, cancellationToken);
         }
 
         report.Subject["throttling"] = caller.Record.Summary;
@@ -263,6 +355,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         }
 
         report.Add(RideAlongObservation(costs, tracked));
+        report.Add(GraphObservation(costs, tracked));
         report.Add(CostObservation(costs));
         report.Add(ClaimObservation(tracked));
         report.Finish();
@@ -321,6 +414,8 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     private async Task<Cost> WalkAsync(
         ThrottleAwareCaller caller,
         string libraryPath,
+        string siteId,
+        string? listId,
         Leg leg,
         IReadOnlyList<Tracked> tracked,
         string token,
@@ -330,13 +425,23 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     {
         var cost = new Cost();
 
+        if (leg.Api == Api.Graph && listId is null)
+        {
+            cost.Refusal = "the list was never resolved through Graph, so this leg was never issued";
+            return cost;
+        }
+
         var top = options.RequestedPageSize is { } size ? $"&$top={size}" : string.Empty;
-        var next = $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
-                   $"/items?{leg.Query}{top}";
+        var next = leg.Api == Api.Graph
+            ? $"{GraphBase}/sites/{siteId}/lists/{listId}/items?{leg.Query}{top}"
+            : $"{options.SiteUrl.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(libraryPath)}')" +
+              $"/items?{leg.Query}{top}";
 
         while (next is not null && cost.Pages < options.PagesToFollow)
         {
-            var observation = await caller.GetAsync(next, token, cancellationToken, SharePointAccept);
+            var observation = leg.Api == Api.Graph
+                ? await caller.GetAsync(next, token, cancellationToken)
+                : await caller.GetAsync(next, token, cancellationToken, SharePointAccept);
             calls.Add(observation);
 
             cost.Pages++;
@@ -373,7 +478,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             foreach (var entry in value.EnumerateArray())
             {
                 cost.Items++;
-                Record(leg, entry, tracked);
+                Record(leg, entry, tracked, report);
             }
 
             next = Link(root.Value, "odata.nextLink") ?? Link(root.Value, "@odata.nextLink");
@@ -395,13 +500,16 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     /// takes, for the same reason: run 77 dropped the expansion believing it did nothing and lost the
     /// value entirely.
     /// </summary>
-    private static void Record(Leg leg, JsonElement entry, IReadOnlyList<Tracked> tracked)
+    private static void Record(Leg leg, JsonElement entry, IReadOnlyList<Tracked> tracked, ProbeReport report)
     {
         var fileRef = Text(entry, "FileRef");
         var leaf = Text(entry, "FileLeafRef");
+
+        // Graph spells the same id lower-case and as a string; SharePoint sends a number. Both are
+        // read rather than one being assumed, because the two APIs are what this run compares.
         var id = entry.TryGetProperty("Id", out var idValue) && idValue.ValueKind == JsonValueKind.Number
             ? idValue.GetInt32().ToString()
-            : Text(entry, "Id");
+            : Text(entry, "Id") ?? Text(entry, "id");
 
         // Id first, because it is the one key no projection here removes. The path forms stay as a
         // fallback for a file Graph could not resolve an id for.
@@ -415,8 +523,8 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             return;
         }
 
-        var expanded = entry.TryGetProperty("FieldValuesAsText", out var text) &&
-                       text.ValueKind == JsonValueKind.Object
+        // The bag this API puts field values in - FieldValuesAsText for SharePoint, fields for Graph.
+        var expanded = entry.TryGetProperty(leg.Bag, out var text) && text.ValueKind == JsonValueKind.Object
             ? text
             : default;
 
@@ -429,15 +537,18 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         // naming it, and that one phrase covers two different services: one that did not expand at
         // all, and one that expanded and left MetaInfo out of what it expanded. Reading the first as
         // the second is how a route gets written off for something it was never asked.
+        var bagKeys = expanded.ValueKind == JsonValueKind.Object
+            ? expanded.EnumerateObject().Select(p => p.Name).ToList()
+            : [];
+
         var from = (fromItem, fromExpansion) switch
         {
-            (not null, not null) => "both the item and FieldValuesAsText",
+            (not null, not null) => $"both the item and {leg.Bag}",
             (not null, null) => "the item itself",
-            (null, not null) => "FieldValuesAsText",
+            (null, not null) => leg.Bag,
             _ when expanded.ValueKind == JsonValueKind.Object =>
-                $"FieldValuesAsText arrived with {expanded.EnumerateObject().Count()} key(s) and " +
-                "MetaInfo was not among them",
-            _ => "no MetaInfo, and no FieldValuesAsText on the row either",
+                $"{leg.Bag} arrived with {bagKeys.Count} key(s) and MetaInfo was not among them",
+            _ => $"no MetaInfo, and no {leg.Bag} on the row either",
         };
 
         // Both spellings, because absence claimed from one spelling is not absence. The prefixed form
@@ -445,10 +556,45 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         // text bag has been seen using.
         var promoted = First(entry, expanded, "OData__IpLabelId") ?? First(entry, expanded, "_IpLabelId");
 
+        // The inheritance flag arrives as a bare true/false rather than as text, so it is read as a
+        // value rather than through the string reader every other column here uses.
+        var unique = Flag(entry, "HasUniqueRoleAssignments") ??
+                     (expanded.ValueKind == JsonValueKind.Object
+                         ? Flag(expanded, "HasUniqueRoleAssignments")
+                         : null);
+
         match.Readings[leg.Name] = new Reading(from, metaInfo, promoted)
         {
             Labels = metaInfo is null ? [] : SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(metaInfo)),
+            Unique = unique,
+            BagKeys = bagKeys,
         };
+
+        // The request asked to see the bag rather than to search it - "a name I do not know cannot be
+        // looked for". Quoted whole, because this is exactly the text a cell would clip.
+        if (leg.QuoteTheBag && expanded.ValueKind == JsonValueKind.Object)
+        {
+            report.Quote(
+                $"{leg.Name} - the whole bag for {match.Path}, {bagKeys.Count} key(s)",
+                string.Join("\n", expanded.EnumerateObject().Select(p =>
+                    $"  {p.Name}: {Summarise(p.Value)}")));
+        }
+    }
+
+    /// <summary>A boolean column, as text, without turning "absent" into "false".</summary>
+    private static string? Flag(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean().ToString().ToLowerInvariant()
+            : Text(element, property);
+
+    /// <summary>
+    /// One bag entry, short enough to read. MetaInfo is thousands of characters and would bury the
+    /// other forty keys, which are the reason the bag is being printed at all.
+    /// </summary>
+    private static string Summarise(JsonElement value)
+    {
+        var raw = value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : value.GetRawText();
+        return raw.Length <= 200 ? raw : $"{raw[..200]}... ({raw.Length} characters in all)";
     }
 
     private static ProbeTable BuildCostTable(IReadOnlyDictionary<string, Cost> costs)
@@ -459,6 +605,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             return (IReadOnlyList<string?>)
             [
                 leg.Name,
+                leg.Api == Api.Graph ? "Graph" : "SharePoint",
                 leg.IsControl ? "control" : "asked about",
                 cost.Pages.ToString(),
                 cost.Refusal is null ? cost.Items.ToString() : "-",
@@ -471,7 +618,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
 
         return new ProbeTable(
             "What each listing cost, and whether it was allowed",
-            ["leg", "kind", "pages", "items", "bytes", "ms", "outcome", "why this leg is here"],
+            ["leg", "api", "kind", "pages", "items", "bytes", "ms", "outcome", "why this leg is here"],
             rows);
     }
 
@@ -498,7 +645,7 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
                         file.ListItemId is null
                             ? $"not looked for - {file.Unresolved ?? "no list item id"}"
                             : "the file was not among this leg's rows",
-                        "-", "-", "-",
+                        "-", "-", "-", "-", "-",
                     ]);
                     continue;
                 }
@@ -509,15 +656,18 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
                     reading.MetaInfo is null ? "no" : "yes",
                     reading.From,
                     reading.LabelText,
-                    reading.PromotedColumn ?? "(the column was not on this row)",
+                    reading.Unique ?? "(not on this row)",
+                    reading.PromotedColumn ?? "(not on this row)",
+                    reading.BagKeys.Count == 0 ? "(no bag)" : reading.BagKeys.Count.ToString(),
                 ]);
             }
         }
 
         return new ProbeTable(
             "What each leg said about each file it was asked about",
-            ["file", "leg", "MetaInfo arrived", "from where", "label GUID in it", "_IpLabelId"],
-            rows.Count == 0 ? [["(no file was configured)", "-", "-", "-", "-", "-"]] : rows);
+            ["file", "leg", "MetaInfo arrived", "from where", "label GUID in it",
+             "HasUniqueRoleAssignments", "_IpLabelId", "keys in the bag"],
+            rows.Count == 0 ? [["(no file was configured)", "-", "-", "-", "-", "-", "-", "-"]] : rows);
     }
 
     private static ProbeTable BuildCallTable(IReadOnlyList<HttpObservation> calls) =>
@@ -558,7 +708,9 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         IReadOnlyDictionary<string, Cost> costs,
         IReadOnlyList<Tracked> tracked)
     {
-        var candidates = Legs.Where(l => !l.IsControl && costs[l.Name].Refusal is null).ToList();
+        var candidates = Legs
+            .Where(l => l.Api == Api.SharePoint && !l.IsControl && costs[l.Name].Refusal is null)
+            .ToList();
 
         if (tracked.Count == 0)
         {
@@ -582,6 +734,56 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         return Observation.Measured("can the label ride along in one listing",
             $"{best.Read} of {tracked.Count} file(s) gave a label GUID from one listing, best via " +
             $"'{best.Leg.Name}'; the per-file call is needed for the remaining {tracked.Count - best.Read}");
+    }
+
+    /// <summary>
+    /// Whether the enumeration can move to Graph, which is the question this run was extended for.
+    /// The two columns are named separately: one of them arriving is not the other one arriving, and
+    /// a single yes/no would hide which half is missing.
+    /// </summary>
+    private static Observation GraphObservation(
+        IReadOnlyDictionary<string, Cost> costs,
+        IReadOnlyList<Tracked> tracked)
+    {
+        var whole = Legs.First(l => l.Api == Api.Graph && l.QuoteTheBag);
+        var cost = costs[whole.Name];
+
+        if (cost.Refusal is not null)
+        {
+            return Observation.Measured("can the enumeration move to Graph",
+                $"the untrimmed Graph leg was refused - {cost.Refusal}. The body is quoted whole above");
+        }
+
+        if (tracked.Count == 0)
+        {
+            return Observation.NotRun("can the enumeration move to Graph",
+                "no file was configured, so no row was followed");
+        }
+
+        var withLabel = tracked.Count(t => t.Readings.TryGetValue(whole.Name, out var r) && r.Labels.Count > 0);
+        var withFlag = tracked.Count(t => t.Readings.TryGetValue(whole.Name, out var r) && r.Unique is not null);
+        var keys = tracked
+            .Select(t => t.Readings.TryGetValue(whole.Name, out var r) ? r.BagKeys.Count : 0)
+            .DefaultIfEmpty(0)
+            .Max();
+
+        var baseline = costs[Legs[0].Name];
+
+        return Observation.Measured("can the enumeration move to Graph",
+            $"MetaInfo: {withLabel} of {tracked.Count}; HasUniqueRoleAssignments: {withFlag} of " +
+            $"{tracked.Count}; the bag held up to {keys} key(s) and is quoted whole above; " +
+            $"{cost.Bytes} bytes over {cost.Pages} page(s) against SharePoint's {baseline.Bytes} " +
+            $"over {baseline.Pages}") with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["whyItMatters"] = "SharePoint REST publishes no per-call cost and carries a separate " +
+                                   "limit; Graph publishes a table. The same answer from Graph is one " +
+                                   "whose cost can be worked out before the run rather than after",
+                ["notMeasured"] = "the published costs themselves. This run measured what arrives, " +
+                                  "not what either service charges for it",
+            },
+        };
     }
 
     private static Observation CostObservation(IReadOnlyDictionary<string, Cost> costs)
