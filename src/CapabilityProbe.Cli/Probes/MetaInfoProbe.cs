@@ -793,18 +793,19 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         var cost = costs[named.Name];
 
         return Observation.Measured("can the enumeration move to Graph",
-            $"named: MetaInfo {withLabel}/{tracked.Count}, HasUniqueRoleAssignments " +
-            $"{withFlag}/{tracked.Count}; unasked: {byDefault}/{tracked.Count} and " +
-            $"{flagByDefault}/{tracked.Count}, with the label's display name on " +
-            $"{nameByDefault}/{tracked.Count}; {cost.Bytes} bytes over {cost.Pages} page(s) against " +
-            $"SharePoint's {baseline.Bytes} over {baseline.Pages}") with
+            $"asked for: MetaInfo {withLabel}/{tracked.Count}, the flag {withFlag}/{tracked.Count}; " +
+            $"{cost.Bytes} bytes over {cost.Pages} page(s) against SharePoint's {baseline.Bytes} " +
+            $"over {baseline.Pages}") with
         {
             Details = new Dictionary<string, string?>
             {
                 ["whyItMatters"] = "SharePoint REST publishes no per-call cost and carries a separate " +
                                    "limit; Graph publishes a table. The same answer from Graph is one " +
                                    "whose cost can be worked out before the run rather than after",
-                ["theBagUnasked"] = $"up to {keys} key(s), quoted whole above",
+                ["theBagUnasked"] = $"up to {keys} key(s), quoted whole above. Unasked, the bag " +
+                                    $"carried MetaInfo on {byDefault}/{tracked.Count}, the flag on " +
+                                    $"{flagByDefault}/{tracked.Count}, and the label's display name " +
+                                    $"on {nameByDefault}/{tracked.Count}",
                 ["displayNameIsThePromotedColumn"] = "the display name is what promotion writes, so it " +
                                                      "answers only for files that promoted (finding 18). " +
                                                      "The per-file column table says which those are",
