@@ -76,6 +76,9 @@ public static class Program
                 ProbeOptionsLoader.PermissionsCommand =>
                     await RunPermissionsAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.MetaInfoCommand =>
+                    await RunMetaInfoAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -141,6 +144,12 @@ public static class Program
         return await new PermissionsProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunMetaInfoAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new MetaInfoProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -196,6 +205,13 @@ public static class Program
         writer.WriteLine("              twice in one run, once through Graph and once through SharePoint's");
         writer.WriteLine("              own role assignments, and the two are subtracted. what could not be");
         writer.WriteLine("              joined gets a row saying why rather than being counted as agreement");
+        writer.WriteLine("  metainfo    can MetaInfo ride along in a bulk listing, instead of costing one call");
+        writer.WriteLine("              per file? the label GUID is in it whether or not the file promoted");
+        writer.WriteLine("              (finding 23), so a listing that carried it would answer in one stage");
+        writer.WriteLine("              what now takes two. both candidate routes are walked beside a listing");
+        writer.WriteLine("              that asks for neither and beside four controls - the promoted column,");
+        writer.WriteLine("              two misspellings and an invented name - because a refusal only means");
+        writer.WriteLine("              'this column is withheld' if an unknown name is refused differently");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

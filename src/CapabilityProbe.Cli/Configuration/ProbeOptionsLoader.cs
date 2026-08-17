@@ -43,17 +43,24 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string PermissionsCommand = "permissions";
 
+    /// <summary>
+    /// Whether <c>MetaInfo</c> arrives in a bulk listing rather than costing one call per file.
+    /// Finding 23 made the column worth asking for in quantity; whether it is allowed in quantity is
+    /// a separate question, and <c>$select</c> in this tenant has refused a listed column before.
+    /// </summary>
+    public const string MetaInfoCommand = "metainfo";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
-        InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand,
+        InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
     private static readonly string[] NeedsApp =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
-        PromotionCommand, DeltaCommand, PermissionsCommand,
+        PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -79,14 +86,14 @@ public static class ProbeOptionsLoader
 
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
     private static readonly string[] SiteReaders =
-        [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand];
+        [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
     /// run with none configured has nothing to compare.
     /// </summary>
     private static readonly string[] NeedsFilePaths =
-        [AccessCommand, PromotionCommand, PermissionsCommand];
+        [AccessCommand, PromotionCommand, PermissionsCommand, MetaInfoCommand];
 
     private static readonly string[] AclOnly = [AclCommand];
 
