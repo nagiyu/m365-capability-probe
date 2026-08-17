@@ -79,6 +79,12 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         new("both routes at once", $"{Base},MetaInfo,FieldValuesAsText&$expand=FieldValuesAsText",
             "whether asking both ways changes either answer, and what asking twice costs"),
 
+        // Run 115 split the two expansion legs cleanly - naming FieldValuesAsText in $select carried
+        // MetaInfo and omitting it did not - which leaves it open which half of that did the work.
+        new("$select names it, no $expand", $"{Base},FieldValuesAsText",
+            "the projection naming the expansion without asking for the expansion. Run 115 left it " +
+            "undecided whether $select or $expand was what made the difference"),
+
         new("$select=OData__IpLabelId", $"{Base},OData__IpLabelId",
             "the promoted column, under the prefix SharePoint REST gives names starting with '_'. " +
             "Not the request's question - it is here because if it rides along too, the listing " +
@@ -344,16 +350,26 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         var fromExpansion = expanded.ValueKind == JsonValueKind.Object ? Text(expanded, "MetaInfo") : null;
 
         var metaInfo = fromItem ?? fromExpansion;
+
+        // Run 115 reported "neither place carried it" for the leg that asked for the expansion without
+        // naming it, and that one phrase covers two different services: one that did not expand at
+        // all, and one that expanded and left MetaInfo out of what it expanded. Reading the first as
+        // the second is how a route gets written off for something it was never asked.
         var from = (fromItem, fromExpansion) switch
         {
             (not null, not null) => "both the item and FieldValuesAsText",
             (not null, null) => "the item itself",
             (null, not null) => "FieldValuesAsText",
-            _ => "neither place carried it",
+            _ when expanded.ValueKind == JsonValueKind.Object =>
+                $"FieldValuesAsText arrived with {expanded.EnumerateObject().Count()} key(s) and " +
+                "MetaInfo was not among them",
+            _ => "no MetaInfo, and no FieldValuesAsText on the row either",
         };
 
-        var promoted = Text(entry, "OData__IpLabelId") ??
-                       (expanded.ValueKind == JsonValueKind.Object ? Text(expanded, "OData__IpLabelId") : null);
+        // Both spellings, because absence claimed from one spelling is not absence. The prefixed form
+        // is what SharePoint REST gives an internal name starting with '_'; the bare form is what the
+        // text bag has been seen using.
+        var promoted = First(entry, expanded, "OData__IpLabelId") ?? First(entry, expanded, "_IpLabelId");
 
         match.Readings[leg.Name] = new Reading(from, metaInfo, promoted)
         {
@@ -524,6 +540,11 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             "- they were chosen because they differ in whether they promoted");
 
     private static string Leaf(string path) => path.TrimEnd('/').Split('/').Last();
+
+    /// <summary>The named value from the row or from its expanded text values, whichever has it.</summary>
+    private static string? First(JsonElement entry, JsonElement expanded, string property) =>
+        Text(entry, property) ??
+        (expanded.ValueKind == JsonValueKind.Object ? Text(expanded, property) : null);
 
     private string SiteUrl()
     {
