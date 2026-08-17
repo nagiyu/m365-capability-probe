@@ -413,14 +413,19 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
 
         var graphJoinable = target.Graph.Count(p => p.CanJoin);
         var sharePointJoinable = target.SharePoint.Count(p => p.CanJoin);
-        var onlySharePoint = target.SharePoint.Count(p => p.CanJoin && p.MatchIn(target.Graph) is null);
+        var onlyInSharePoint = target.SharePoint.Where(p => p.CanJoin && p.MatchIn(target.Graph) is null).ToList();
+        var onlySharePoint = onlyInSharePoint.Count;
+        var conveyingNone = onlyInSharePoint.Count(p => p.ConveysAccess == false);
         var onlyGraph = target.Graph.Count(p => p.CanJoin && p.MatchIn(target.SharePoint) is null);
 
+        // The subtraction leads, the inventory follows: this cell is clipped to the column width, and
+        // what a reader needs is the difference and whether it conveys anything, not the totals.
         var observed = target.GraphRefusal is not null || target.SharePointRefusal is not null
             ? "one of the two readings did not arrive, so this file was not compared"
-            : $"{target.Graph.Count} Graph entries ({graphJoinable} joinable), " +
-              $"{target.SharePoint.Count} SharePoint assignments ({sharePointJoinable} joinable); " +
-              $"{onlyGraph} only in Graph, {onlySharePoint} only in SharePoint";
+            : $"{onlyGraph} only in Graph, {onlySharePoint} only in SharePoint" +
+              (conveyingNone == 0 ? string.Empty : $" ({conveyingNone} conveying none)") +
+              $"; {target.Graph.Count} Graph entries ({graphJoinable} joinable), " +
+              $"{target.SharePoint.Count} SharePoint assignments ({sharePointJoinable} joinable)";
 
         return Observation.Measured(target.Path, observed) with
         {
@@ -459,11 +464,22 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
             .SelectMany(t => t.Graph.Where(p => p.CanJoin && p.MatchIn(t.SharePoint) is null).Select(p => (t.Path, p)))
             .ToList();
 
+        // Run 106 put "4 grant(s) ... are in SharePoint and not in Graph" here and I read it as Graph
+        // hiding four people; run 109 showed all four were 制限付きアクセス, which conveys nothing
+        // (finding 15). The console clips this cell at its column width, so it is not enough for the
+        // capability to be somewhere in the sentence - the deciding number goes first, before any
+        // clip can reach it.
+        var withAccess = missing.Where(m => m.p.ConveysAccess != false).ToList();
+        var withoutAccess = missing.Count - withAccess.Count;
+
         var observed = missing.Count == 0 && extra.Count == 0
             ? $"across {compared.Count} file(s), every grant naming a directory principal appeared on " +
               "both sides - app-only Graph is not dropping any of them"
-            : $"across {compared.Count} file(s), {missing.Count} grant(s) naming a directory principal are " +
-              $"in SharePoint and not in Graph, and {extra.Count} are in Graph and not in SharePoint";
+            : $"{withAccess.Count} grant(s) that convey access are in SharePoint and not in Graph" +
+              (withoutAccess == 0
+                  ? string.Empty
+                  : $" ({withoutAccess} more are there and convey none - 制限付きアクセス, finding 15)") +
+              $"; {extra.Count} in Graph and not in SharePoint; {compared.Count} file(s) compared";
 
         return Observation.Measured("is app-only being shown everything", observed) with
         {
@@ -472,7 +488,10 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
                 ["filesCompared"] = compared.Count.ToString(),
                 ["onlyInSharePoint"] = missing.Count == 0
                     ? "(none)"
-                    : string.Join("; ", missing.Select(m => $"{m.Path}: {m.p.Kind} {m.p.Name}")),
+                    : string.Join("; ", missing.Select(m => $"{m.Path}: {m.p.Kind} {m.p.Name} - {m.p.Detail}")),
+                ["onlyInSharePointConveyingAccess"] = withAccess.Count == 0
+                    ? "(none)"
+                    : string.Join("; ", withAccess.Select(m => $"{m.Path}: {m.p.Kind} {m.p.Name} - {m.p.Detail}")),
                 ["onlyInGraph"] = extra.Count == 0
                     ? "(none)"
                     : string.Join("; ", extra.Select(e => $"{e.Path}: {e.p.Kind} {e.p.Name}")),
