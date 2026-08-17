@@ -48,6 +48,14 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
     {
         public required string Path { get; init; }
 
+        /// <summary>
+        /// True for the library root rather than a file in it. The root is where a grant is placed
+        /// when it is meant to reach everything inheriting, so what sits there is what every
+        /// inheriting file's Limited Access rows are an echo of - which makes it worth reading whole
+        /// rather than inferring from the files.
+        /// </summary>
+        public bool IsRoot { get; init; }
+
         public string? ItemId { get; set; }
         public string? ListItemId { get; set; }
         public string? Name { get; set; }
@@ -124,11 +132,24 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         var libraryPath = AclResponses.DriveServerRelativePath(drive);
 
         var targets = options.Files.Select(p => new Target { Path = p }).ToList();
+        targets.Add(new Target { Path = "(the library root)", IsRoot = true });
 
         foreach (var target in targets)
         {
             console.WriteLine($"Reading {target.Path}...");
-            await ReadGraphAsync(caller, driveId, target, graph.AccessToken, calls, cancellationToken);
+            await ReadGraphAsync(caller, driveId, target, graph.AccessToken, calls, report, cancellationToken);
+
+            if (target.IsRoot)
+            {
+                // Deliberately one-sided. The baseline this run compares against is a file's role
+                // assignments, and the list's own are a different collection with a different shape -
+                // reading them here would put two unlike things in one column and call it agreement.
+                target.SharePointRefusal =
+                    "not read - the root's SharePoint counterpart is the list's own role assignments, " +
+                    "which is a different collection from a file's and is not what this run compares";
+                continue;
+            }
+
             await ReadSharePointAsync(caller, libraryPath, target, sharePoint, calls, cancellationToken);
         }
 
@@ -146,6 +167,7 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
             report.Add(FileObservation(target));
         }
 
+        report.Add(LimitedAccessObservation(targets));
         report.Add(FullnessObservation(targets));
         report.Add(KindObservation(targets));
         report.Add(BaselineObservation());
@@ -159,6 +181,7 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         Target target,
         string token,
         List<HttpObservation> calls,
+        ProbeReport report,
         CancellationToken cancellationToken)
     {
         if (driveId is null)
@@ -167,11 +190,13 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
             return;
         }
 
-        var encoded = string.Join('/', target.Path.TrimStart('/').Split('/').Select(Uri.EscapeDataString));
-        var item = await caller.GetAsync(
-            $"{GraphBase}/drives/{driveId}/root:/{encoded}?$select=id,name,createdBy,sharepointIds",
-            token,
-            cancellationToken);
+        var address = target.IsRoot
+            ? $"{GraphBase}/drives/{driveId}/root?$select=id,name,createdBy,sharepointIds"
+            : $"{GraphBase}/drives/{driveId}/root:/" +
+              string.Join('/', target.Path.TrimStart('/').Split('/').Select(Uri.EscapeDataString)) +
+              "?$select=id,name,createdBy,sharepointIds";
+
+        var item = await caller.GetAsync(address, token, cancellationToken);
         calls.Add(item);
 
         var root = Root(item);
@@ -210,7 +235,31 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         }
 
         target.Graph.AddRange(GrantParty.FromGraph(value));
+
+        // Every entry, whole. The request asks whether anything besides `roles` marks a grant as
+        // Limited Access - and "nothing does" is only sayable from the entry as it arrived, not from
+        // the fields this tool happens to read. A key nobody looked for is not a key that is absent.
+        var index = 0;
+        foreach (var entry in value.EnumerateArray())
+        {
+            index++;
+            report.Quote($"Graph /permissions on {target.Path}, entry {index} of {value.GetArrayLength()}",
+                Indent(entry));
+        }
+
+        if (value.GetArrayLength() == 0)
+        {
+            report.Quote($"Graph /permissions on {target.Path}",
+                "200 OK, and the collection was empty. No entry to quote");
+        }
     }
+
+    /// <summary>One permission entry as it arrived, indented so a reader can see where it ends.</summary>
+    private static string Indent(JsonElement entry) =>
+        string.Join("\n", JsonSerializer
+            .Serialize(entry, new JsonSerializerOptions { WriteIndented = true })
+            .Split('\n')
+            .Select(line => $"  {line.TrimEnd()}"));
 
     /// <summary>
     /// The same item read the other way. Asked for through the collection with a filter rather than
@@ -438,6 +487,56 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
                 ["sharePointAssignments"] = target.SharePoint.Count.ToString(),
                 ["graphRefusal"] = target.GraphRefusal,
                 ["sharePointRefusal"] = target.SharePointRefusal,
+            },
+        };
+    }
+
+    /// <summary>
+    /// What Graph says about the principals SharePoint marks as conveying nothing.
+    /// <para>
+    /// Graph reduces a role to <c>owner</c> / <c>read</c> / <c>write</c>, and Limited Access is none
+    /// of those three - so either the principal does not appear, in which case Graph has dropped a row
+    /// that grants nothing and no harm follows, or it appears as one of the three and the distinction
+    /// finding 15 rests on is gone with nothing in the reply to rebuild it from. Which of those two it
+    /// is decides whether an ACL can be read from Graph at all, so it is answered here rather than
+    /// left to be worked out from the tables.
+    /// </para>
+    /// </summary>
+    private static Observation LimitedAccessObservation(IReadOnlyList<Target> targets)
+    {
+        var pairs = targets
+            .Where(t => t.SharePointRefusal is null && t.GraphRefusal is null)
+            .SelectMany(t => t.SharePoint
+                .Where(p => p.CanJoin && p.ConveysAccess == false)
+                .Select(p => (t.Path, Party: p, InGraph: p.PartyIn(t.Graph))))
+            .ToList();
+
+        if (pairs.Count == 0)
+        {
+            return Observation.NotRun("what Graph says about a Limited Access holder",
+                "no file in this run had a grant SharePoint marks as conveying nothing, so there was " +
+                "nothing to look up. The roles are in the SharePoint table above");
+        }
+
+        var shown = pairs.Where(p => p.InGraph is not null).ToList();
+
+        var observed = shown.Count == 0
+            ? $"0 of {pairs.Count} such grant(s) appear in Graph at all - it drops them"
+            : $"{shown.Count} of {pairs.Count} such grant(s) appear in Graph, as: " +
+              string.Join("; ", shown
+                  .Select(p => $"{p.Party.Name} on {p.Path} -> {p.InGraph!.Detail}")
+                  .Distinct());
+
+        return Observation.Measured("what Graph says about a Limited Access holder", observed) with
+        {
+            Details = new Dictionary<string, string?>
+            {
+                ["howLimitedAccessWasIdentified"] = "SharePoint's own permission mask, through " +
+                                                    "InventorySharing.Role.Reaches - the same reading " +
+                                                    "findings 15 and 71 were measured with",
+                ["entriesQuotedWhole"] = "every Graph permission entry is quoted above as it arrived, " +
+                                         "so 'nothing else marks it' can be checked rather than taken " +
+                                         "from the columns this tool chose to read",
             },
         };
     }
