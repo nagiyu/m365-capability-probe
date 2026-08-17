@@ -518,36 +518,35 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
                 "nothing to look up. The roles are in the SharePoint table above");
         }
 
-        var shown = pairs.Where(p => p.InGraph is not null).ToList();
+        // Both halves as counts, and the counts first. The previous shape put the deciding comparison
+        // in a clause at the end of the sentence, and run 122 clipped it at the column width - the
+        // third time in this repository that a finding's deciding fact was written past the clip.
+        var readable = targets.Where(t => t.GraphRefusal is null && t.SharePointRefusal is null).ToList();
 
-        // "0 of 2" has two readings, and only one of them is about Limited Access: the row may be
-        // absent because Limited Access is absent, or because this principal is absent from Graph
-        // everywhere. They are separated by looking for the same principal on the other files -
-        // where they hold something that does convey access, Graph either shows them or it does not.
-        var elsewhere = pairs
+        var lines = pairs
             .Select(p => p.Party)
             .DistinctBy(party => party.Name, StringComparer.Ordinal)
-            .Select(party => (
-                party.Name,
-                Seen: targets
-                    .Where(t => t.GraphRefusal is null)
-                    .Select(t => (t.Path, Match: party.PartyIn(t.Graph)))
-                    .Where(x => x.Match is not null)
-                    .ToList()))
+            .Select(party =>
+            {
+                var held = readable
+                    .SelectMany(t => t.SharePoint
+                        .Where(sp => sp.CanJoin && sp.Keys.Any(k =>
+                            party.Keys.Contains(k, StringComparer.OrdinalIgnoreCase)))
+                        .Select(sp => (t, sp)))
+                    .ToList();
+
+                var limited = held.Where(x => x.sp.ConveysAccess == false).ToList();
+                var conveying = held.Where(x => x.sp.ConveysAccess != false).ToList();
+
+                var limitedShown = limited.Count(x => party.PartyIn(x.t.Graph) is not null);
+                var conveyingShown = conveying.Count(x => party.PartyIn(x.t.Graph) is not null);
+
+                return $"{party.Name}: Graph shows {limitedShown}/{limited.Count} Limited Access, " +
+                       $"{conveyingShown}/{conveying.Count} conveying";
+            })
             .ToList();
 
-        var control = string.Join("; ", elsewhere.Select(e => e.Seen.Count == 0
-            ? $"{e.Name} appears in no file's Graph reply in this run"
-            : $"{e.Name} appears in Graph on " +
-              string.Join(", ", e.Seen.Select(x => $"{x.Path} as {x.Match!.Detail}"))));
-
-        var observed = shown.Count == 0
-            ? $"0 of {pairs.Count} such grant(s) appear in Graph at all - it drops them. " +
-              $"Whether that is about Limited Access or about the principal: {control}"
-            : $"{shown.Count} of {pairs.Count} such grant(s) appear in Graph, as: " +
-              string.Join("; ", shown
-                  .Select(p => $"{p.Party.Name} on {p.Path} -> {p.InGraph!.Detail}")
-                  .Distinct());
+        var observed = string.Join("; ", lines);
 
         return Observation.Measured("what Graph says about a Limited Access holder", observed) with
         {
@@ -559,6 +558,12 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
                 ["entriesQuotedWhole"] = "every Graph permission entry is quoted above as it arrived, " +
                                          "so 'nothing else marks it' can be checked rather than taken " +
                                          "from the columns this tool chose to read",
+                ["howToReadTheTwoCounts"] = "the second count is the control. A principal Graph never " +
+                                            "shows would give 0 on both, and would say nothing about " +
+                                            "Limited Access; one shown where the grant conveys access " +
+                                            "and not where it does not is the distinction being lost " +
+                                            "on purpose. A zero denominator means this run had no such " +
+                                            "file and the control is missing, not passed",
             },
         };
     }
