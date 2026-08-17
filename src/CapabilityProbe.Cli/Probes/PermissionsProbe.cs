@@ -324,10 +324,12 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
         {
             foreach (var party in target.Graph.Where(p => p.CanJoin))
             {
+                var other = party.PartyIn(target.SharePoint);
                 var match = party.MatchIn(target.SharePoint);
                 rows.Add([
                     target.Path, party.Kind, party.Name, "yes",
                     match is null ? "no" : "yes",
+                    $"{party.Detail} | {other?.Detail ?? "-"}",
                     match ?? "(no key in common)",
                     match is null ? "only Graph" : "both",
                 ]);
@@ -342,6 +344,7 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
 
                 rows.Add([
                     target.Path, party.Kind, party.Name, "no", "yes",
+                    $"- | {party.Detail}",
                     "(no key in common)", "only SharePoint",
                 ]);
             }
@@ -349,8 +352,9 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
 
         return new ProbeTable(
             "The subtraction - grants naming a directory principal, on both sides",
-            ["path", "kind", "principal", "in Graph", "in SharePoint", "matched on", "side"],
-            rows.Count == 0 ? [["(nothing could be joined)", "-", "-", "-", "-", "-", "-"]] : rows);
+            ["path", "kind", "principal", "in Graph", "in SharePoint", "grant (Graph | SharePoint)",
+             "matched on", "side"],
+            rows.Count == 0 ? [["(nothing could be joined)", "-", "-", "-", "-", "-", "-", "-"]] : rows);
     }
 
     /// <summary>

@@ -48,6 +48,18 @@ public sealed record GrantParty
     }
 
     /// <summary>
+    /// The party on the other side this one meets, rather than only the key they meet on.
+    /// <para>
+    /// Run 106 printed four rows as "only SharePoint" without saying what the grant was, and the
+    /// obvious reading - Graph is hiding a person - is one this repository has been wrong about
+    /// before. Whether that row is a real grant or a Limited Access artefact (finding 15) is decided
+    /// by its roles, so the roles have to travel into the comparison.
+    /// </para>
+    /// </summary>
+    public GrantParty? PartyIn(IEnumerable<GrantParty> others) =>
+        others.FirstOrDefault(o => o.Keys.Any(k => Keys.Contains(k, StringComparer.OrdinalIgnoreCase)));
+
+    /// <summary>
     /// What Graph returned for one item, one party per permission entry.
     /// <para>
     /// A sharing link is emitted as its own party and deliberately carries no key. The two APIs do
