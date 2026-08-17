@@ -79,6 +79,9 @@ public static class Program
                 ProbeOptionsLoader.MetaInfoCommand =>
                     await RunMetaInfoAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.SelectedCommand =>
+                    await RunSelectedAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -150,6 +153,12 @@ public static class Program
         return await new MetaInfoProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
+    private static async Task<ProbeReport> RunSelectedAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new SelectedProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Graph and Entra return display names and messages in whatever language the tenant uses, and the
     /// Windows console otherwise falls back to a code page that turns anything outside it into '?'.
@@ -212,6 +221,13 @@ public static class Program
         writer.WriteLine("              that asks for neither and beside four controls - the promoted column,");
         writer.WriteLine("              two misspellings and an invented name - because a refusal only means");
         writer.WriteLine("              'this column is withheld' if an unknown name is refused differently");
+        writer.WriteLine("  selected    under site-by-site permission, what does a site the app was never granted");
+        writer.WriteLine("              answer? put several site URLs in SiteUrl separated by '|' - a granted one,");
+        writer.WriteLine("              a granted-with-more one, and an ungranted one - and the same ladder of");
+        writer.WriteLine("              calls is walked against each in one run. a refusal is visible to a caller;");
+        writer.WriteLine("              a 200 with an empty collection is not, and that is the outcome this");
+        writer.WriteLine("              subcommand exists to make loud. the app must hold Sites.Selected and");
+        writer.WriteLine("              nothing wider, or every site answers and the run measures that instead");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

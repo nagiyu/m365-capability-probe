@@ -296,12 +296,26 @@ public sealed class ProbeOptions
                 "the inventory app registration");
 
     /// <summary>Host name taken from <see cref="SiteUrl"/>. Used to build the SharePoint scope.</summary>
+    /// <summary>
+    /// Every site named in <see cref="SiteUrl"/>, in the order they were given.
+    /// <para>
+    /// Only <c>selected</c> reads more than one. It has to: the question it asks - what a site the app
+    /// was never granted answers - cannot be put to one site, because the reply from an ungranted site
+    /// only means something beside the reply from a granted one, in the same run and through the same
+    /// calls. Every other subcommand takes the first and ignores the rest.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<string> Sites => Several(SiteUrl);
+
+    /// <summary>The first site named, which is what every subcommand but <c>selected</c> means by "the site".</summary>
+    private string FirstSite => Sites.Count == 0 ? string.Empty : Sites[0];
+
     public string SiteHost =>
-        Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+        Uri.TryCreate(FirstSite, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
 
     /// <summary>Server-relative path taken from <see cref="SiteUrl"/>, e.g. <c>/sites/name</c>.</summary>
     public string SiteServerRelativePath =>
-        Uri.TryCreate(SiteUrl, UriKind.Absolute, out var uri)
+        Uri.TryCreate(FirstSite, UriKind.Absolute, out var uri)
             ? uri.AbsolutePath.TrimEnd('/')
             : string.Empty;
 }

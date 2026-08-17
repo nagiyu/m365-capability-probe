@@ -12,13 +12,13 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo, selected]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
       # for some choices. Left empty where it is needed, the probe stops and names the missing key.
       site_url:
-        description: "SiteUrl - https://<host>/sites/<name> (auth, access, sharepoint, acl, inventory, promotion, delta, permissions, metainfo)"
+        description: "SiteUrl - https://<host>/sites/<name>. selected takes SEVERAL, separated by '|', and compares them; every other subcommand reads the first and ignores the rest"
         type: string
         required: false
         default: ""
