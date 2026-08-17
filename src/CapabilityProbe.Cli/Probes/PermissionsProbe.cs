@@ -520,8 +520,30 @@ public sealed class PermissionsProbe(ProbeOptions options, ProbeHttpClient http,
 
         var shown = pairs.Where(p => p.InGraph is not null).ToList();
 
+        // "0 of 2" has two readings, and only one of them is about Limited Access: the row may be
+        // absent because Limited Access is absent, or because this principal is absent from Graph
+        // everywhere. They are separated by looking for the same principal on the other files -
+        // where they hold something that does convey access, Graph either shows them or it does not.
+        var elsewhere = pairs
+            .Select(p => p.Party)
+            .DistinctBy(party => party.Name, StringComparer.Ordinal)
+            .Select(party => (
+                party.Name,
+                Seen: targets
+                    .Where(t => t.GraphRefusal is null)
+                    .Select(t => (t.Path, Match: party.PartyIn(t.Graph)))
+                    .Where(x => x.Match is not null)
+                    .ToList()))
+            .ToList();
+
+        var control = string.Join("; ", elsewhere.Select(e => e.Seen.Count == 0
+            ? $"{e.Name} appears in no file's Graph reply in this run"
+            : $"{e.Name} appears in Graph on " +
+              string.Join(", ", e.Seen.Select(x => $"{x.Path} as {x.Match!.Detail}"))));
+
         var observed = shown.Count == 0
-            ? $"0 of {pairs.Count} such grant(s) appear in Graph at all - it drops them"
+            ? $"0 of {pairs.Count} such grant(s) appear in Graph at all - it drops them. " +
+              $"Whether that is about Limited Access or about the principal: {control}"
             : $"{shown.Count} of {pairs.Count} such grant(s) appear in Graph, as: " +
               string.Join("; ", shown
                   .Select(p => $"{p.Party.Name} on {p.Path} -> {p.InGraph!.Detail}")
