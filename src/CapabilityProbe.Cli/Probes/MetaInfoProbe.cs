@@ -109,6 +109,21 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     {
         public string? Expected { get; set; }
 
+        /// <summary>
+        /// The list item id, resolved through Graph before any leg runs.
+        /// <para>
+        /// Runs 115 and 116 matched rows on <c>FileRef</c> and <c>FileLeafRef</c>, and the leg that
+        /// sends no <c>$select</c> came back with neither - so all four files read as "not in this
+        /// leg's rows" and the leg looked like it had carried nothing. It may have carried everything.
+        /// A key that is itself part of what the leg varies cannot be the key: this one is asked for
+        /// once, from a different API, and holds still while the projections change.
+        /// </para>
+        /// </summary>
+        public string? ListItemId { get; set; }
+
+        /// <summary>Why this file has no id, when it has none. Never left to be inferred.</summary>
+        public string? Unresolved { get; set; }
+
         /// <summary>Keyed by leg name. Absent means that leg produced no row for this file at all.</summary>
         public Dictionary<string, Reading> Readings { get; } = [];
     }
@@ -144,6 +159,8 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         report.Subject["asking"] = "whether MetaInfo arrives in a bulk listing of the library's items, " +
                                    "and what it costs when it does";
         report.Subject["files followed"] = string.Join(", ", options.Files);
+        report.Subject["matched on"] = "the list item id, resolved through Graph before any leg runs - " +
+                                       "a key none of the projections under test can remove";
 
         var source = AppOnlyTokenSource.WithCertificate(options, app);
         if (source.IsUnavailable)
@@ -215,6 +232,13 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             .Select(p => new Tracked(p) { Expected = $"{libraryPath}/{p.TrimStart('/')}" })
             .ToList();
 
+        var driveId = ReadString(drive, "id");
+
+        foreach (var file in tracked)
+        {
+            await ResolveAsync(caller, driveId, file, graph.AccessToken, calls, cancellationToken);
+        }
+
         var costs = new Dictionary<string, Cost>(StringComparer.Ordinal);
 
         foreach (var leg in Legs)
@@ -243,6 +267,50 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
         report.Add(ClaimObservation(tracked));
         report.Finish();
         return report;
+    }
+
+    /// <summary>
+    /// The list item id for one configured file, asked of Graph rather than of the listing. Asking
+    /// the listing would mean the key depends on the projection, which is the very thing the legs
+    /// vary - and runs 115 and 116 lost a whole leg to exactly that.
+    /// </summary>
+    private async Task ResolveAsync(
+        ThrottleAwareCaller caller,
+        string? driveId,
+        Tracked file,
+        string token,
+        List<HttpObservation> calls,
+        CancellationToken cancellationToken)
+    {
+        if (driveId is null)
+        {
+            file.Unresolved = "the drive was never resolved, so no item could be addressed";
+            return;
+        }
+
+        var encoded = string.Join('/', file.Path.TrimStart('/').Split('/').Select(Uri.EscapeDataString));
+        var item = await caller.GetAsync(
+            $"{GraphBase}/drives/{driveId}/root:/{encoded}?$select=id,name,sharepointIds",
+            token,
+            cancellationToken);
+        calls.Add(item);
+
+        var root = Root(item);
+        if (root is null)
+        {
+            file.Unresolved = $"the item was never resolved ({item.StatusText})";
+            return;
+        }
+
+        file.ListItemId = root.Value.TryGetProperty("sharepointIds", out var ids) &&
+                          ids.ValueKind == JsonValueKind.Object
+            ? Text(ids, "listItemId")
+            : null;
+
+        if (file.ListItemId is null)
+        {
+            file.Unresolved = "the item resolved but carried no sharepointIds.listItemId";
+        }
     }
 
     /// <summary>
@@ -331,8 +399,14 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
     {
         var fileRef = Text(entry, "FileRef");
         var leaf = Text(entry, "FileLeafRef");
+        var id = entry.TryGetProperty("Id", out var idValue) && idValue.ValueKind == JsonValueKind.Number
+            ? idValue.GetInt32().ToString()
+            : Text(entry, "Id");
 
+        // Id first, because it is the one key no projection here removes. The path forms stay as a
+        // fallback for a file Graph could not resolve an id for.
         var match = tracked.FirstOrDefault(t =>
+            (id is not null && t.ListItemId is not null && string.Equals(id, t.ListItemId, StringComparison.Ordinal)) ||
             (fileRef is not null && string.Equals(fileRef, t.Expected, StringComparison.OrdinalIgnoreCase)) ||
             (leaf is not null && string.Equals(leaf, Leaf(t.Path), StringComparison.OrdinalIgnoreCase)));
 
@@ -416,7 +490,16 @@ public sealed class MetaInfoProbe(ProbeOptions options, ProbeHttpClient http, Te
             {
                 if (!file.Readings.TryGetValue(leg.Name, out var reading))
                 {
-                    rows.Add([file.Path, leg.Name, "the file was not in this leg's rows", "-", "-", "-"]);
+                    // Distinguished from "this leg carried nothing": if the file has no id, the probe
+                    // had nothing to recognise it by, which is a fact about the probe.
+                    rows.Add([
+                        file.Path,
+                        leg.Name,
+                        file.ListItemId is null
+                            ? $"not looked for - {file.Unresolved ?? "no list item id"}"
+                            : "the file was not among this leg's rows",
+                        "-", "-", "-",
+                    ]);
                     continue;
                 }
 
