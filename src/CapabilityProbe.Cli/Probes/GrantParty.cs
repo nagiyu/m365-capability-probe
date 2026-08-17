@@ -36,6 +36,19 @@ public sealed record GrantParty
     /// <summary>Where the keys came from, for the report.</summary>
     public required string KeyBasis { get; init; }
 
+    /// <summary>
+    /// Whether this grant lets its holder read the document, or only appear beside it. Null where the
+    /// side does not say - Graph has no equivalent of Limited Access, so its parties leave this unset
+    /// rather than claim an answer.
+    /// <para>
+    /// Finding 15 is the reason this is a field and not a reading of <see cref="Detail"/>: 制限付き
+    /// アクセス is a row SharePoint really does hold and Graph really does not return, so the
+    /// subtraction is right to print it - and a reader who stops at the count concludes Graph is
+    /// hiding a person. The count and the capability have to arrive together.
+    /// </para>
+    /// </summary>
+    public bool? ConveysAccess { get; init; }
+
     public bool CanJoin => Keys.Count > 0;
 
     public string KeyList => Keys.Count == 0 ? "(none)" : string.Join(", ", Keys);
@@ -46,6 +59,18 @@ public sealed record GrantParty
         var theirs = others.SelectMany(o => o.Keys).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return Keys.FirstOrDefault(theirs.Contains);
     }
+
+    /// <summary>
+    /// The party on the other side this one meets, rather than only the key they meet on.
+    /// <para>
+    /// Run 106 printed four rows as "only SharePoint" without saying what the grant was, and the
+    /// obvious reading - Graph is hiding a person - is one this repository has been wrong about
+    /// before. Whether that row is a real grant or a Limited Access artefact (finding 15) is decided
+    /// by its roles, so the roles have to travel into the comparison.
+    /// </para>
+    /// </summary>
+    public GrantParty? PartyIn(IEnumerable<GrantParty> others) =>
+        others.FirstOrDefault(o => o.Keys.Any(k => Keys.Contains(k, StringComparer.OrdinalIgnoreCase)));
 
     /// <summary>
     /// What Graph returned for one item, one party per permission entry.
@@ -190,6 +215,11 @@ public sealed record GrantParty
                     : string.Join(", ", g.Roles.Select(r => r.Describe)),
                 Keys = keys,
                 KeyBasis = basis.Count == 0 ? "the assignment named nothing this tool could key on" : string.Join(" + ", basis),
+
+                // InventorySharing.Role.Reaches, not a second opinion about the same masks - findings
+                // 15 and 71 were measured with it, and a row this tool classified differently would be
+                // two implementations disagreeing rather than anything about the tenant.
+                ConveysAccess = g.Roles.Count == 0 ? null : g.Roles.Any(r => r.Reaches),
             };
         }).ToList();
 

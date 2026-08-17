@@ -33,7 +33,7 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
 
     private const string ItemSelect =
         "id,name,size,createdBy,lastModifiedBy,createdDateTime,lastModifiedDateTime," +
-        "sensitivityLabel,sharepointIds";
+        "sensitivityLabel,sharepointIds,publication";
 
     /// <summary>
     /// Which of the list's columns this reports per file. Discovered from the list rather than
@@ -73,6 +73,18 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         public string? ItemId { get; set; }
         public string? ListItemId { get; set; }
         public long? Size { get; set; }
+
+        /// <summary>
+        /// The <c>publication</c> facet exactly as it arrived, or why it did not.
+        /// <para>
+        /// A run that compares "while the condition is on" against "after it was lifted" rests on
+        /// somebody remembering which of the two a given run was. That is the one part of a
+        /// measurement this repository has no business taking on trust, and for a checked-out file
+        /// the service says so itself. Printed raw rather than reduced to a flag: whatever this
+        /// facet carries is the answer, and a boolean derived here would be this tool's opinion.
+        /// </para>
+        /// </summary>
+        public string? Publication { get; set; }
 
         /// <summary>Graph's listing answer, kept as it arrived including a bare false (finding 14).</summary>
         public bool? FacetProtectionEnabled { get; set; }
@@ -406,6 +418,9 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
         subject.Size = root.Value.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number
             ? size.GetInt64()
             : null;
+        subject.Publication = root.Value.TryGetProperty("publication", out var publication)
+            ? publication.GetRawText()
+            : "(the key is not on this item)";
         subject.Created = Text(root.Value, "createdDateTime");
         subject.Modified = Text(root.Value, "lastModifiedDateTime");
         subject.GraphCreatedBy = Identity(root.Value, "createdBy");
@@ -811,7 +826,8 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
     /// </summary>
     private static ProbeTable BuildProvenanceTable(IReadOnlyList<Subject> subjects, DateTimeOffset runAt) =>
         new("Who made each file, how old it is now, and what identifiers it got",
-            ["file", "since it changed", "uploaded by", "last written by", "modified", "Document ID", "bytes"],
+            ["file", "since it changed", "uploaded by", "last written by", "modified", "Document ID",
+             "bytes", "publication"],
             subjects.Select(s => (IReadOnlyList<string?>)new[]
             {
                 s.Path,
@@ -823,6 +839,11 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
                     ? docId.Length > 0 ? docId : "empty"
                     : "did not arrive",
                 s.Size?.ToString() ?? "not read",
+
+                // Whether the file is checked out is a condition an operator would otherwise assert
+                // from memory across a run taken while it was on and one taken after it was lifted.
+                // The service reports it, so the run records it rather than being told.
+                s.Publication ?? "not read",
             }).ToList());
 
     /// <summary>
