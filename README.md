@@ -1136,6 +1136,34 @@ walk します。`fields` は SharePoint の `FieldValuesAsText` と同じ考え
 どのサイトも答えてしまい、この実行はそれを測ることになります** ― **成功に見えて何も確立しない、
 唯一の結果**です。
 
+#### 束取りの ACL を 1 段足しています
+
+```
+GET {SiteUrl}/_api/web/GetList('<ライブラリのパス>')/items
+    ?$select=Id,FileLeafRef,FileRef,HasUniqueRoleAssignments
+    &$expand=RoleAssignments/Member,RoleAssignments/RoleDefinitionBindings
+```
+
+**`inventory` の B 節が使っているものと同じ呼び出し**です。**これはテナント全体の
+`Sites.FullControl.All` でしか通ったことがありません**（所見 5・8）。**サイト単位の
+`fullcontrol` で通るなら、テナント全体の付与なしで一括取得ができる**ことになります。
+
+**所見 27 で `_api/web/sitegroups` は `Sites.Selected` で通っている**ので、**SharePoint REST の
+門自体は開いています。** 残っているのは**この呼び出しが別枠かどうか**です。
+
+**行数だけでは足りません。** 役割割り当てが全部空で返ってきたページと、マスクまで入っている
+ページは、**同じ `200`・同じ行数**です。そこで **`RoleDefinitionBindings` の中身**まで数えます ―
+**`BasePermissions` の `High` / `Low` が来ている数**。所見 15 はそのマスクで決まるので、
+**マスクの無い応答は同じ応答ではありません。**
+
+**この段は、はしごの最後に足してあります** ― 上の段の順番を動かすと、所見 27 と並べられなく
+なるからです。
+
+**測った結果（所見 28）: 通ります。** `fullcontrol` のサイトで `200 OK`、**`BasePermissions` の
+`High` / `Low` まで到着**しました。`read` のサイトでは **`403`**。**テナント全体の
+`Sites.FullControl.All` は要りません** ― `inventory` の B 節は**サイトごとに `fullcontrol` を
+配る形**で動かせます。
+
 #### この実行が言えないこと
 
 **どのサイトを付与したかは、この道具には分かりません。** 付与は外でやったことで、確かめる手段は
