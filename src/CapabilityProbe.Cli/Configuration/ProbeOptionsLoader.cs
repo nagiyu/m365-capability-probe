@@ -65,11 +65,19 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string HiddenCommand = "hidden";
 
+    /// <summary>
+    /// Whether a label that never reached the list's columns can still be read from a listing.
+    /// Finding 24 read it out of the document's own bag; finding 30 read eight columns out of the
+    /// listing and every value in them was a promoted value. The two point opposite ways, and which
+    /// one holds decides whether a survey can stay in bulk or has to open files one at a time.
+    /// </summary>
+    public const string UnpromotedCommand = "unpromoted";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
         InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-        SelectedCommand, HiddenCommand,
+        SelectedCommand, HiddenCommand, UnpromotedCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
@@ -77,7 +85,7 @@ public static class ProbeOptionsLoader
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
         PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand, SelectedCommand,
-        HiddenCommand,
+        HiddenCommand, UnpromotedCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -104,14 +112,14 @@ public static class ProbeOptionsLoader
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
     private static readonly string[] SiteReaders =
         [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-         SelectedCommand, HiddenCommand];
+         SelectedCommand, HiddenCommand, UnpromotedCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
     /// run with none configured has nothing to compare.
     /// </summary>
     private static readonly string[] NeedsFilePaths =
-        [AccessCommand, PromotionCommand, PermissionsCommand, MetaInfoCommand];
+        [AccessCommand, PromotionCommand, PermissionsCommand, MetaInfoCommand, UnpromotedCommand];
 
     private static readonly string[] AclOnly = [AclCommand];
 
