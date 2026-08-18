@@ -127,6 +127,16 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
         /// <summary>Every key the FieldValuesAsText bag returned.</summary>
         public List<string> TextKeys { get; } = [];
 
+        /// <summary>
+        /// Who has the file checked out, straight from the list's own bag.
+        /// <para>
+        /// Leg 4 turns on a specimen being checked out, and "we checked it out" is something done in a
+        /// browser rather than something this run can see. Reading it back means a leg measuring
+        /// check-out cannot quietly be measuring a file that was checked in again.
+        /// </para>
+        /// </summary>
+        public string? CheckoutUser { get; set; }
+
         public string? MetaInfo { get; set; }
         public IReadOnlyList<SharePointMetaInfo.Label> Labels { get; set; } = [];
 
@@ -638,6 +648,7 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 specimen.TextMatches++;
                 specimen.FoundInText = true;
                 specimen.TextKeys.AddRange(bag.EnumerateObject().Select(p => p.Name));
+                specimen.CheckoutUser = Text(bag, "CheckoutUser");
                 specimen.MetaInfo = Text(bag, "MetaInfo");
                 specimen.Labels = SharePointMetaInfo.Labels(SharePointMetaInfo.Parse(specimen.MetaInfo));
             }
@@ -678,13 +689,14 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
     private static ProbeTable SpecimenTable(IReadOnlyList<Library> libraries) =>
         new("Each specimen, on both routes. 'promoted' is whether the list's own label column carried " +
             "anything; 'label in the file' is what MetaInfo says, which does not depend on the list",
-            ["file", "ext", "rows matched", "promoted", "listing: columns with a value", "label in the file"],
+            ["file", "ext", "checked out", "promoted", "listing: columns with a value", "label in the file"],
             libraries.SelectMany(l => l.Specimens.Select(s => (IReadOnlyList<string?>)
             [
                 s.Leaf,
                 s.Extension,
-                $"{s.StreamMatches} listing / {s.TextMatches} bag" +
-                    (s.LeafSeen > s.StreamMatches ? $" ({s.LeafSeen} share the name)" : string.Empty),
+                !s.FoundInText
+                    ? "(no row)"
+                    : string.IsNullOrEmpty(s.CheckoutUser) ? "no" : "yes",
                 !s.FoundInStream ? "(row never returned)" : s.Promoted ? "yes" : "no",
                 !s.FoundInStream
                     ? "-"
@@ -792,6 +804,9 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 {
                     ["library"] = specimen.Library,
                     ["extension"] = specimen.Extension,
+                    ["checked out"] = specimen.FoundInText
+                        ? string.IsNullOrEmpty(specimen.CheckoutUser) ? "no" : "yes"
+                        : "(no row)",
                     ["rows matched"] =
                         $"{specimen.StreamMatches} from the listing, {specimen.TextMatches} from the bag" +
                         (specimen.LeafSeen > specimen.StreamMatches
