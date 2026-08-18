@@ -103,6 +103,10 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
         var report = new ProbeReport("hidden");
         report.Subject["tenant"] = options.TenantId;
         report.Subject["site"] = options.SiteUrl;
+        report.Subject["registrations"] =
+            $"{options.ProbeApp.Label} and {options.InventoryApp.Label} - " +
+            "the first because it is the only one device code is configured on, the second because " +
+            "findings 24, 25 and 29 were measured with it";
         report.Subject["needles"] = string.Join(", ", Needles);
         report.Subject["invented name"] = InventedColumn;
         report.Subject["files named"] = options.Files.Count == 0
@@ -204,13 +208,25 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
     {
         var legs = new List<Leg>();
 
-        console.WriteLine("Establishing the application identity (certificate)...");
+        // The probe's own registration first, because it is the only one that can ever fill the
+        // delegated column - device code is configured on it and nowhere else. Every app-only row in
+        // this run would otherwise be a registration that cannot be asked the second half of the
+        // question, and the comparison would be between two apps rather than between two ways of
+        // speaking.
+        console.WriteLine("Establishing the probe registration (certificate)...");
         var certificate = AppOnlyTokenSource.WithCertificate(options);
-        legs.Add(await AppLegAsync("app-only (certificate)", certificate, cancellationToken));
+        legs.Add(await AppLegAsync("app-only cert (probe)", certificate, cancellationToken));
 
-        console.WriteLine("Establishing the application identity (shared secret)...");
+        // And the registration findings 24, 25 and 29 were measured with. Without it, a refusal here
+        // and a refusal there would be attributed to the route when they might belong to the app.
+        var inventory = options.InventoryApp;
+        console.WriteLine($"Establishing {inventory.Label} (certificate)...");
+        var inventoryCertificate = AppOnlyTokenSource.WithCertificate(options, inventory);
+        legs.Add(await AppLegAsync("app-only cert (inventory)", inventoryCertificate, cancellationToken));
+
+        console.WriteLine("Establishing the probe registration (shared secret)...");
         var secret = AppOnlyTokenSource.WithSecret(options);
-        legs.Add(await AppLegAsync("app-only (secret)", secret, cancellationToken));
+        legs.Add(await AppLegAsync("app-only secret (probe)", secret, cancellationToken));
 
         var delegated = new DelegatedTokenSource(options, console);
         console.WriteLine(delegated.Enabled
@@ -646,13 +662,14 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
                     leg.StreamStatus is null
                         ? "not asked"
                         : leg.PerFile.TryGetValue(file, out var set)
-                            ? $"{set.Count} of {columnCount} carried a value"
-                            : $"0 of {columnCount} carried a value"))
+                            ? $"{set.Count} of {columnCount}: {Join(set)}"
+                            : $"0 of {columnCount}"))
                 .ToList()).ToList();
 
         return new ProbeTable(
-            "Columns that carried a value, per file. A file the listing never returned reads as 0 here, " +
-            "so the row count in the route table is what separates 'empty' from 'absent'",
+            "Columns that carried a value, per file - which ones, never what was in them. A file the " +
+            "listing never returned reads as 0 here, so the row count in the route table is what " +
+            "separates 'empty' from 'absent'",
             header,
             rows);
     }
@@ -699,22 +716,32 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
             };
         }
 
-        if (speaking.Count < 2)
+        // Only the identities the route actually answered. An identity refused at the door returns no
+        // columns for a reason that has nothing to do with columns, and counting it here would report
+        // finding 6 - the secret being turned away by SharePoint - as though hidden columns were
+        // identity-dependent. Run 129 did exactly that, and the headline read "8 of 8 columns differ
+        // between identities" about a leg that never got inside.
+        var answered = speaking.Where(l => l.StreamStatus is not null && l.StreamStatus.StartsWith("200")).ToList();
+        var turnedAway = speaking.Except(answered).ToList();
+
+        if (answered.Count < 2)
         {
             yield return Observation.NotRun(
-                "whether app-only loses a column",
-                $"{speaking.Count} identity/identities reached SharePoint, so there was nothing to compare");
+                "whether the answer depends on who is asking",
+                $"{answered.Count} of {speaking.Count} identities were answered by the route " +
+                $"({Join(turnedAway.Select(l => $"{l.Name}: {l.StreamStatus ?? "not asked"}"))}), " +
+                "so there was no pair to compare");
             yield break;
         }
 
         // The comparison the run exists for, stated as a difference rather than as two lists a reader
         // has to diff by eye.
-        var everywhere = speaking.Skip(1)
-            .Aggregate(new HashSet<string>(speaking[0].KeyReturned, StringComparer.OrdinalIgnoreCase),
+        var everywhere = answered.Skip(1)
+            .Aggregate(new HashSet<string>(answered[0].KeyReturned, StringComparer.OrdinalIgnoreCase),
                 (acc, leg) => { acc.IntersectWith(leg.KeyReturned); return acc; });
 
         var anywhere = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var leg in speaking)
+        foreach (var leg in answered)
         {
             anywhere.UnionWith(leg.KeyReturned);
         }
@@ -728,11 +755,14 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
         {
             Details = new Dictionary<string, string?>
             {
-                ["identities compared"] = string.Join(", ", speaking.Select(l => l.Name)),
+                ["identities compared"] = string.Join(", ", answered.Select(l => l.Name)),
+                ["turned away at the door, not compared"] = turnedAway.Count == 0
+                    ? "(none)"
+                    : string.Join("; ", turnedAway.Select(l => $"{l.Name}: {l.StreamStatus ?? "not asked"}")),
                 ["returned to every identity"] = Join(everywhere),
                 ["returned to some but not all"] = Join(split),
                 ["per identity"] = string.Join("; ",
-                    speaking.Select(l => $"{l.Name}={l.KeyReturned.Count}")),
+                    answered.Select(l => $"{l.Name}={l.KeyReturned.Count}")),
                 ["note"] = "one list, one set of column names, one run - so a difference here is the " +
                            "caller and not the route, the library or the moment",
             },
