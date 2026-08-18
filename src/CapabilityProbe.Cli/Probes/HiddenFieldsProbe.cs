@@ -54,6 +54,31 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
     private const string InventedColumn = "_ProbeNoSuchColumnXyzzy";
 
     /// <summary>
+    /// The only columns whose values are written down, named one by one rather than matched by shape.
+    /// <para>
+    /// Everything else in this run is recorded as "a value arrived" and nothing more, because the
+    /// values in this library are file names, user names and label identifiers. These three are a
+    /// flag, a flag and a version number: nothing in them names a person or a document. The
+    /// distinction matters because finding 29 turns on it - a classification-only file and an
+    /// unlabelled one carry a value in exactly the same three columns, so presence cannot tell them
+    /// apart and only the values can.
+    /// </para>
+    /// <para>
+    /// An allow list of exact names rather than a rule about types: a rule would silently widen the
+    /// day a column of some matching shape starts carrying something personal, and nobody would be
+    /// looking. Adding a name here is a decision somebody has to make on purpose.
+    /// </para>
+    /// </summary>
+    private static readonly string[] ValuesRecorded =
+        ["_HasEncryptedContent", "_HasUserDefinedProtection", "_IpLabelPromotionCtagVersion"];
+
+    /// <summary>
+    /// A cap on a recorded value. The three above are short by nature; if one ever is not, that is a
+    /// surprise worth seeing rather than a body worth keeping whole.
+    /// </summary>
+    private const int MaxRecordedValue = 100;
+
+    /// <summary>
     /// A bound on rows, high enough for a test library and reported whenever it bites. The question is
     /// which columns come back rather than how many files there are, but a silently truncated listing
     /// would make "no file carried a value" mean two different things.
@@ -95,6 +120,12 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
         public Dictionary<string, HashSet<string>> PerFile { get; } =
             new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Per named file, the values of the few columns on the allow list - and of nothing else.
+        /// </summary>
+        public Dictionary<string, Dictionary<string, string>> PerFileValues { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+
         public int RowsReturned { get; set; }
     }
 
@@ -109,6 +140,9 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
             "findings 24, 25 and 29 were measured with it";
         report.Subject["needles"] = string.Join(", ", Needles);
         report.Subject["invented name"] = InventedColumn;
+        report.Subject["values written down"] =
+            $"{string.Join(", ", ValuesRecorded)} - and no others. Every other column is recorded as " +
+            "whether a value arrived, never as what it was";
         report.Subject["files named"] = options.Files.Count == 0
             ? "(none - every row is counted, none is named)"
             : string.Join(", ", options.Files);
@@ -180,6 +214,7 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
         if (options.Files.Count > 0)
         {
             report.Add(FileTable(legs, names.Count));
+            report.Add(ValueTable(legs));
         }
 
         report.Add(CallTable(calls));
@@ -485,16 +520,32 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
 
                 leg.ValueSeen.Add(name);
 
-                if (leaf is not null && Named(leaf) is { } named)
+                if (leaf is null || Named(leaf) is not { } named)
                 {
-                    if (!leg.PerFile.TryGetValue(named, out var set))
-                    {
-                        set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        leg.PerFile[named] = set;
-                    }
-
-                    set.Add(name);
+                    continue;
                 }
+
+                if (!leg.PerFile.TryGetValue(named, out var set))
+                {
+                    set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    leg.PerFile[named] = set;
+                }
+
+                set.Add(name);
+
+                // The one place a value is written down, and only for a name on the list above.
+                if (!ValuesRecorded.Contains(name, StringComparer.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!leg.PerFileValues.TryGetValue(named, out var values))
+                {
+                    values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    leg.PerFileValues[named] = values;
+                }
+
+                values[name] = Short(cell);
             }
         }
     }
@@ -580,6 +631,16 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
         JsonValueKind.Object => cell.EnumerateObject().Any(),
         _ => true,
     };
+
+    /// <summary>A value as it arrived, capped. Reached only for the names on the allow list.</summary>
+    private static string Short(JsonElement cell)
+    {
+        var text = cell.ValueKind == JsonValueKind.String
+            ? cell.GetString() ?? string.Empty
+            : cell.GetRawText();
+
+        return text.Length <= MaxRecordedValue ? text : text[..MaxRecordedValue] + "...[truncated]";
+    }
 
     /// <summary>The configured path this leaf name belongs to, or null when the run did not name it.</summary>
     private string? Named(string leaf) =>
@@ -670,6 +731,43 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
             "Columns that carried a value, per file - which ones, never what was in them. A file the " +
             "listing never returned reads as 0 here, so the row count in the route table is what " +
             "separates 'empty' from 'absent'",
+            header,
+            rows);
+    }
+
+    /// <summary>
+    /// The values, for the three names on the allow list and no others.
+    /// <para>
+    /// One row per identity per file rather than a single row per file, so that two identities
+    /// disagreeing is visible rather than averaged away by whichever one the table happened to read.
+    /// </para>
+    /// </summary>
+    private ProbeTable ValueTable(IReadOnlyList<Leg> legs)
+    {
+        var header = new List<string> { "identity", "file" };
+        header.AddRange(ValuesRecorded);
+
+        var rows = new List<IReadOnlyList<string?>>();
+
+        foreach (var leg in legs.Where(l => l.StreamStatus is not null))
+        {
+            foreach (var file in options.Files)
+            {
+                leg.PerFileValues.TryGetValue(file, out var values);
+
+                rows.Add(new List<string?> { leg.Name, file }
+                    .Concat(ValuesRecorded.Select(name =>
+                        values is not null && values.TryGetValue(name, out var value)
+                            ? value
+                            : "(no value)"))
+                    .ToList());
+            }
+        }
+
+        return new ProbeTable(
+            "The three columns whose values this run writes down, per file. Every other column in " +
+            "this report is presence only - these three are a flag, a flag and a version number, and " +
+            "finding 29 cannot be settled without them",
             header,
             rows);
     }
