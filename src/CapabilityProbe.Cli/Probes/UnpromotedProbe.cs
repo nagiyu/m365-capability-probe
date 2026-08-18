@@ -772,6 +772,35 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
             yield return Observation.NotRun(library.Title, library.Unresolved ?? "never resolved");
         }
 
+        // A library that answers and answers with nothing. This gets said out loud rather than left
+        // to be inferred from a row count, because it is the one outcome that looks like good news:
+        // a refusal is visible to a caller and an empty collection is not, and a survey reading this
+        // reports "no files here" about a library somebody has files in.
+        foreach (var library in libraries.Where(l =>
+                     l.Path is not null &&
+                     l.Stream?.Status is not null && l.Stream.Status.StartsWith("200") &&
+                     l.Stream.Rows == 0))
+        {
+            yield return Observation.Measured(
+                $"{library.Title} answered with nothing",
+                $"0 rows over {library.Stream.Pages} page(s), status {library.Stream.Status} - " +
+                $"{library.Specimens.Count} named specimen(s) were expected in it")
+                with
+            {
+                Details = new Dictionary<string, string?>
+                {
+                    ["path"] = library.Path,
+                    ["/fields"] = library.FieldsStatus,
+                    ["FieldValuesAsText"] = library.Text?.Describe,
+                    ["specimens expected"] = Join(library.Specimens.Select(x => x.Leaf)),
+                    ["what this does not say"] =
+                        "whether the library is empty, whether these files are hidden from this " +
+                        "caller, or whether nothing in it has a version this caller may see. " +
+                        "Telling those apart needs a file in the same library that this run can see",
+                },
+            };
+        }
+
         // The controls are picked by what was measured rather than by which file the operator meant:
         // a specimen carrying no label in its own bytes is the thing an unlabelled control is.
         var controls = all.Where(s => s.FoundInText && !s.Labelled).ToList();
