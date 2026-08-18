@@ -38,6 +38,18 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
     private static readonly string[] Needles =
         ["IpLabel", "Sensitivity", "Rms", "MSIP", "Encrypt", "Protect", "Classif"];
 
+    /// <summary>
+    /// Columns the needles do not catch and this run has to look at anyway.
+    /// <para>
+    /// <c>_DisplayName</c> holds the promoted label's display name - findings 22 and 29 turn on it -
+    /// and not one of the needles above appears in it. Run 133 swept ten columns and this was not
+    /// among them; it showed up only because the whole bag was printed. That is the failure the
+    /// request warned about in so many words: a column nobody knows the name of cannot be searched
+    /// for.
+    /// </para>
+    /// </summary>
+    private static readonly string[] AlsoNamed = ["_DisplayName"];
+
     /// <summary>The allow list from finding 30: a flag, a flag and a version number, and nothing else.</summary>
     private static readonly string[] ValuesRecorded =
         ["_HasEncryptedContent", "_HasUserDefinedProtection", "_IpLabelPromotionCtagVersion"];
@@ -99,6 +111,16 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
 
         /// <summary>Protection columns whose cell was not empty.</summary>
         public HashSet<string> StreamValues { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Every key in the listing whose cell was not empty, swept or not.
+        /// <para>
+        /// The narrow set above can only find columns somebody thought to name. This one cannot miss a
+        /// column for being unnamed, which is the whole reason the request asked for the bag rather
+        /// than for the columns that stood up.
+        /// </para>
+        /// </summary>
+        public HashSet<string> AllValues { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public Dictionary<string, string> Recorded { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -397,6 +419,7 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
     }
 
     private static bool Matches(string internalName, string? title) =>
+        AlsoNamed.Contains(internalName, StringComparer.OrdinalIgnoreCase) ||
         Needles.Any(needle =>
             internalName.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
             (title is not null && title.Contains(needle, StringComparison.OrdinalIgnoreCase)));
@@ -479,7 +502,16 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
 
         specimen.StreamMatches++;
         specimen.FoundInStream = true;
-        specimen.StreamKeys.AddRange(row.EnumerateObject().Select(p => p.Name));
+
+        foreach (var property in row.EnumerateObject())
+        {
+            specimen.StreamKeys.Add(property.Name);
+
+            if (HasValue(property.Value))
+            {
+                specimen.AllValues.Add(property.Name);
+            }
+        }
 
         foreach (var column in library.Columns)
         {
@@ -734,7 +766,7 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
         var everywhere = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var control in controls)
         {
-            everywhere.UnionWith(control.StreamValues);
+            everywhere.UnionWith(control.AllValues);
         }
 
         foreach (var specimen in all)
@@ -747,13 +779,13 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
 
             // Counts first, and the deciding one first of those: a column that also stands up on a
             // file with no label is not reading the label, whatever its name promises.
-            var telling = specimen.StreamValues.Except(everywhere, StringComparer.OrdinalIgnoreCase).ToList();
+            var telling = specimen.AllValues.Except(everywhere, StringComparer.OrdinalIgnoreCase).ToList();
 
             yield return Observation.Measured(
                 specimen.Leaf,
-                $"{telling.Count} column(s) stand up here and not on an unlabelled file, " +
-                $"{specimen.StreamValues.Count} stand up at all; " +
-                $"MetaInfo: {(specimen.Labelled ? "label present" : "no label")}")
+                $"{telling.Count} key(s) stand up here and not on an unlabelled file, " +
+                $"{specimen.AllValues.Count} of {specimen.StreamKeys.Distinct(StringComparer.Ordinal).Count()} " +
+                $"stand up at all; MetaInfo: {(specimen.Labelled ? "label present" : "no label")}")
                 with
             {
                 Details = new Dictionary<string, string?>
@@ -767,8 +799,8 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                             : string.Empty),
                     ["promoted"] = specimen.FoundInStream ? specimen.Promoted ? "yes" : "no" : "(no row)",
                     ["labelled in its own bytes"] = specimen.FoundInText ? specimen.Labelled ? "yes" : "no" : "(no row)",
-                    ["columns telling it from an unlabelled file"] = Join(telling),
-                    ["columns with any value"] = Join(specimen.StreamValues),
+                    ["keys telling it from an unlabelled file"] = Join(telling),
+                    ["swept columns with any value"] = Join(specimen.StreamValues),
                     ["label from MetaInfo"] = specimen.Labels.Count == 0
                         ? "(none)"
                         : string.Join("; ", specimen.Labels.Select(l => l.Describe)),
@@ -792,14 +824,15 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
         }
 
         var stood = subjects
-            .SelectMany(s => s.StreamValues.Except(everywhere, StringComparer.OrdinalIgnoreCase))
+            .SelectMany(s => s.AllValues.Except(everywhere, StringComparer.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         yield return Observation.Measured(
             "whether the listing can read a label that never promoted",
-            $"{stood.Count} column(s) stood up on {subjects.Count} unpromoted specimen(s); " +
-            $"MetaInfo carried the label on {subjects.Count(s => s.Labelled)} of them")
+            $"{stood.Count} key(s) stood up on {subjects.Count} unpromoted specimen(s), " +
+            $"out of {subjects.Max(s => s.StreamKeys.Distinct(StringComparer.Ordinal).Count())} the " +
+            $"listing returned; MetaInfo carried the label on {subjects.Count(s => s.Labelled)} of them")
             with
         {
             Details = new Dictionary<string, string?>
@@ -808,8 +841,10 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 ["unlabelled controls"] = controls.Count == 0
                     ? "(none - so 'stands up here and not there' had nothing to subtract)"
                     : Join(controls.Select(s => s.Leaf)),
-                ["columns that stood up"] = Join(stood),
-                ["columns discounted for standing up on an unlabelled file too"] = Join(everywhere),
+                ["keys that stood up"] = Join(stood),
+                ["keys discounted for standing up on an unlabelled file too"] = $"{everywhere.Count}",
+                ["counted over"] = "every key the listing returned, not only the swept columns - a " +
+                                   "column nobody knows the name of cannot be searched for",
                 ["note"] = "one call sequence over both routes, so the difference between them is the " +
                            "route and not the moment",
             },
