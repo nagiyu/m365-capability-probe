@@ -308,6 +308,12 @@ public sealed class PromotionProbe(ProbeOptions options, ProbeHttpClient http, T
 
         report.Subject["throttling"] = caller.Record.Summary;
 
+        // The definitions, beside the files. Sorting display names into "protects" and "only
+        // classifies" is a claim about the label rather than about the file, and the two have to be
+        // read in one run or the sorting is done against a memory of the other one.
+        console.WriteLine("Asking where a label definition can be read from...");
+        report.Add(await LabelDefinitions.ReadAsync(caller, graph.AccessToken, calls, report, cancellationToken));
+
         report.Add(BuildColumnTable(columns, columnsUnread, sharePoint));
         report.Add(BuildPromotionTable(subjects, columns));
         report.Add(BuildProvenanceTable(subjects, runAt));
