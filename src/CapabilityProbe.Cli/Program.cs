@@ -82,6 +82,9 @@ public static class Program
                 ProbeOptionsLoader.SelectedCommand =>
                     await RunSelectedAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.HiddenCommand =>
+                    await RunHiddenAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -151,6 +154,12 @@ public static class Program
     {
         using var http = new ProbeHttpClient();
         return await new MetaInfoProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
+    private static async Task<ProbeReport> RunHiddenAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new HiddenFieldsProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
     private static async Task<ProbeReport> RunSelectedAsync(ProbeOptions options, CancellationToken cancellationToken)
@@ -228,6 +237,15 @@ public static class Program
         writer.WriteLine("              a 200 with an empty collection is not, and that is the outcome this");
         writer.WriteLine("              subcommand exists to make loud. the app must hold Sites.Selected and");
         writer.WriteLine("              nothing wider, or every site answers and the run measures that instead");
+        writer.WriteLine("  hidden      does a hidden column answer an app the way it answers a person? finding 24");
+        writer.WriteLine("              measured $select refusing a column that exists - while speaking for someone");
+        writer.WriteLine("              signed in. hidden is a display flag rather than a permission, but app-only");
+        writer.WriteLine("              callers are trimmed on a different footing, so it is measured rather than");
+        writer.WriteLine("              assumed. the list's own field definitions, that same $select, and");
+        writer.WriteLine("              RenderListDataAsStream are put to every identity against one list in one");
+        writer.WriteLine("              run, with an invented name beside them - because 'no such column' means");
+        writer.WriteLine("              nothing until an undefined name is refused differently. values are never");
+        writer.WriteLine("              recorded; whether one arrived is the whole measurement");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

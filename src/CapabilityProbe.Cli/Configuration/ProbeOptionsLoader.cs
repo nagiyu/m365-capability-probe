@@ -57,11 +57,19 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string SelectedCommand = "selected";
 
+    /// <summary>
+    /// Whether a hidden column answers an application the way it answers a person. Finding 24 measured
+    /// the refusal while speaking for someone signed in; hidden is documented as a display flag rather
+    /// than a permission, and app-only callers are trimmed on a different footing. Between a document
+    /// and a measurement, this tool takes the measurement.
+    /// </summary>
+    public const string HiddenCommand = "hidden";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
         InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-        SelectedCommand,
+        SelectedCommand, HiddenCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
@@ -69,6 +77,7 @@ public static class ProbeOptionsLoader
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
         PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand, SelectedCommand,
+        HiddenCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -95,7 +104,7 @@ public static class ProbeOptionsLoader
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
     private static readonly string[] SiteReaders =
         [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-         SelectedCommand];
+         SelectedCommand, HiddenCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
