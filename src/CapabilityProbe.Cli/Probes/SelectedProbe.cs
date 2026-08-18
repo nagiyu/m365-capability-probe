@@ -41,6 +41,9 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
         public string? DriveId { get; set; }
         public string? ItemId { get; set; }
 
+        /// <summary>The library's server-relative path, which is what GetList takes as a literal.</summary>
+        public string? LibraryPath { get; set; }
+
         public List<Rung> Rungs { get; } = [];
     }
 
@@ -57,6 +60,14 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
         public int? Count { get; set; }
         public string? Note { get; set; }
 
+        /// <summary>
+        /// What a row actually carried, where the count alone would not settle it. The bulk ACL rung
+        /// is the reason this exists: a page of items that arrives with every role assignment empty is
+        /// a different outcome from one that arrives with the masks filled in, and both are 200 with
+        /// the same number of rows.
+        /// </summary>
+        public string? Detail { get; set; }
+
         public bool Issued => Status is not null || Note is null;
 
         /// <summary>
@@ -71,8 +82,8 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
             : SilentlyEmpty
                 ? $"{StatusText}, and the collection was EMPTY"
                 : Count is { } count
-                    ? $"{StatusText}, {count} row(s)"
-                    : StatusText;
+                    ? $"{StatusText}, {count} row(s)" + (Detail is null ? string.Empty : $"; {Detail}")
+                    : StatusText + (Detail is null ? string.Empty : $"; {Detail}");
     }
 
     public async Task<ProbeReport> RunAsync(CancellationToken cancellationToken)
@@ -173,7 +184,7 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
         var address = $"{GraphBase}/sites/{uri.Host}:" +
                       string.Join('/', uri.AbsolutePath.TrimEnd('/').Split('/').Select(Uri.EscapeDataString));
 
-        var resolved = await Ask(caller, site, "resolve the site", "GET", address, graphToken, calls,
+        var (resolved, _) = await Ask(caller, site, "resolve the site", "GET", address, graphToken, calls,
             cancellationToken);
 
         site.Id = resolved is null ? null : Text(resolved.Value, "id");
@@ -190,17 +201,18 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
         }
         else
         {
-            var drive = await Ask(caller, site, "resolve the library", "GET",
+            var (drive, _) = await Ask(caller, site, "resolve the library", "GET",
                 $"{GraphBase}/sites/{site.Id}/drive?$select=id,webUrl", graphToken, calls, cancellationToken);
             site.DriveId = drive is null ? null : Text(drive.Value, "id");
+            site.LibraryPath = drive is null ? null : ServerRelative(Text(drive.Value, "webUrl"));
 
             var children = site.DriveId is null
-                ? null
+                ? (null, null)
                 : await Ask(caller, site, "list the site's files", "GET",
                     $"{GraphBase}/drives/{site.DriveId}/root/children?$select=id,name,file",
                     graphToken, calls, cancellationToken);
 
-            site.ItemId = FirstId(children);
+            site.ItemId = FirstId(children.Item1);
 
             if (site.DriveId is null)
             {
@@ -223,16 +235,16 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
             }
             else
             {
-                await Ask(caller, site, "read a file's label", "GET",
+                _ = await Ask(caller, site, "read a file's label", "GET",
                     $"{GraphBase}/drives/{site.DriveId}/items/{site.ItemId}?$select=id,name,sensitivityLabel",
                     graphToken, calls, cancellationToken);
 
-                await Ask(caller, site, "read a file's sharing", "GET",
+                _ = await Ask(caller, site, "read a file's sharing", "GET",
                     $"{GraphBase}/drives/{site.DriveId}/items/{site.ItemId}/permissions",
                     graphToken, calls, cancellationToken);
             }
 
-            await Ask(caller, site, "read the site's own grants", "GET",
+            _ = await Ask(caller, site, "read the site's own grants", "GET",
                 $"{GraphBase}/sites/{site.Id}/permissions", graphToken, calls, cancellationToken);
         }
 
@@ -247,13 +259,126 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
             return;
         }
 
-        await Ask(caller, site, "list the site's groups", "GET",
+        _ = await Ask(caller, site, "list the site's groups", "GET",
             $"{site.Url.TrimEnd('/')}/_api/web/sitegroups", sharePointToken, calls, cancellationToken,
             SharePointAccept);
+
+        // The bulk ACL, added last so the rungs above keep the order run 124 measured them in.
+        //
+        // This is the call inventory's B half is built on, and it has only ever gone through under a
+        // tenant-wide Sites.FullControl.All (findings 5 and 8). Whether a site-scoped fullcontrol is
+        // enough decides whether a whole-library ACL can be read without a tenant-wide grant at all -
+        // and finding 27 already showed the SharePoint REST door itself opens under Sites.Selected,
+        // so what is left is whether this particular call is its own gate.
+        if (site.LibraryPath is null)
+        {
+            site.Rungs.Add(new Rung("bulk ACL for the whole library", "GET", "(no library path)")
+            {
+                Note = "the library was never resolved, so GetList had nothing to name",
+            });
+
+            return;
+        }
+
+        var bulk = $"{site.Url.TrimEnd('/')}/_api/web/GetList('{Uri.EscapeDataString(site.LibraryPath)}')" +
+                   "/items?$select=Id,FileLeafRef,FileRef,HasUniqueRoleAssignments" +
+                   "&$expand=RoleAssignments/Member,RoleAssignments/RoleDefinitionBindings";
+
+        var (body, rung) = await Ask(caller, site, "bulk ACL for the whole library", "GET", bulk,
+            sharePointToken, calls, cancellationToken, SharePointAccept);
+
+        if (body is not null)
+        {
+            // A page of items whose role assignments are all empty is 200 with the same row count as a
+            // page that carries the masks. Counting rows would call those the same answer.
+            rung.Detail = Inspect(body.Value);
+        }
     }
 
+    /// <summary>
+    /// What the bulk ACL reply actually carried, past the row count: how many assignments came with
+    /// the items, and how many of their role definitions arrived with a permission mask rather than
+    /// only a name. Finding 15 turns on that mask, so a reply without it is not the same reply.
+    /// </summary>
+    private static string Inspect(JsonElement body)
+    {
+        if (!body.TryGetProperty("value", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            return "no 'value' array in the reply";
+        }
+
+        var assignments = 0;
+        var bindings = 0;
+        var masked = 0;
+        var unique = 0;
+
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.TryGetProperty("HasUniqueRoleAssignments", out var u) && u.ValueKind == JsonValueKind.True)
+            {
+                unique++;
+            }
+
+            foreach (var assignment in Collection(item, "RoleAssignments"))
+            {
+                assignments++;
+
+                foreach (var binding in Collection(assignment, "RoleDefinitionBindings"))
+                {
+                    bindings++;
+
+                    if (binding.TryGetProperty("BasePermissions", out var mask) &&
+                        mask.ValueKind == JsonValueKind.Object &&
+                        mask.TryGetProperty("High", out _) && mask.TryGetProperty("Low", out _))
+                    {
+                        masked++;
+                    }
+                }
+            }
+        }
+
+        return $"{assignments} assignment(s), {bindings} role definition(s), {masked} with High+Low, " +
+               $"{unique} item(s) with unique permissions";
+    }
+
+    /// <summary>
+    /// An expanded collection, in both shapes SharePoint writes one: a bare array under
+    /// <c>nometadata</c>, an object with <c>results</c> under the verbose formats. The probe asks for
+    /// the first and does not get to decide what arrives.
+    /// </summary>
+    private static IEnumerable<JsonElement> Collection(JsonElement parent, string name)
+    {
+        if (!parent.TryGetProperty(name, out var value))
+        {
+            yield break;
+        }
+
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in value.EnumerateArray())
+            {
+                yield return entry;
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Object &&
+                 value.TryGetProperty("results", out var results) &&
+                 results.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in results.EnumerateArray())
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    /// <summary>The server-relative path out of a webUrl, decoded, which is what GetList takes.</summary>
+    private static string? ServerRelative(string? webUrl) =>
+        Uri.TryCreate(webUrl, UriKind.Absolute, out var uri)
+            ? Uri.UnescapeDataString(uri.AbsolutePath).TrimEnd('/')
+            : null;
+
     /// <summary>One rung: issued, recorded, and reduced to a status plus a row count.</summary>
-    private static async Task<JsonElement?> Ask(
+    private static async Task<(JsonElement? Body, Rung Rung)> Ask(
         ThrottleAwareCaller caller,
         Site site,
         string name,
@@ -286,7 +411,7 @@ public sealed class SelectedProbe(ProbeOptions options, ProbeHttpClient http, Te
         }
 
         site.Rungs.Add(rung);
-        return root;
+        return (root, rung);
     }
 
     private static ProbeTable BuildLadderTable(IReadOnlyList<Site> sites)
