@@ -77,7 +77,22 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
         public required string Library { get; init; }
         public required string Path { get; init; }
         public string Leaf => Path.TrimStart('/').Split('/').Last();
+
+        /// <summary>The full server-relative path this specimen means, once the library is known.</summary>
+        public string? FileRef { get; set; }
         public string Extension => Path.Contains('.') ? Path[Path.LastIndexOf('.')..] : "(none)";
+
+        /// <summary>
+        /// How many items each route matched. More than one means the library holds another file of
+        /// the same name somewhere else, and a specimen that absorbed it would be reporting two files
+        /// as one - so it is counted rather than merged away.
+        /// </summary>
+        public int StreamMatches { get; set; }
+
+        public int TextMatches { get; set; }
+
+        /// <summary>Items sharing this leaf name anywhere in the library, however deep.</summary>
+        public int LeafSeen { get; set; }
 
         /// <summary>Every key the listing returned for this row, whatever it held.</summary>
         public List<string> StreamKeys { get; } = [];
@@ -126,8 +141,10 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
             $"{string.Join(", ", ValuesRecorded)} - and no others. Every other column is recorded as " +
             "whether a value arrived, never as what it was";
         report.Subject["matched on"] =
-            "FileLeafRef, asked for by name in both routes - so the key is not part of what the two " +
-            "routes vary";
+            "FileRef - the full server-relative path - asked for by name in both routes, so the key " +
+            "is not part of what the two routes vary. Run 132 matched on FileLeafRef instead and one " +
+            "specimen silently absorbed a second item of the same name from somewhere else in the " +
+            "library; how many items share each leaf is now reported rather than merged";
         report.Subject["paging"] =
             $"RowLimit {options.RequestedPageSize ?? DefaultRowLimit} with Paged=TRUE, following at " +
             $"most {options.PagesToFollow} page(s). Without Paged the listing ends at the limit " +
@@ -323,7 +340,14 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
 
             foreach (var (_, path) in group)
             {
-                library.Specimens.Add(new Specimen { Library = library.Title, Path = path });
+                library.Specimens.Add(new Specimen
+                {
+                    Library = library.Title,
+                    Path = path,
+                    FileRef = library.Path is null
+                        ? null
+                        : $"{library.Path.TrimEnd('/')}/{path.TrimStart('/')}",
+                });
             }
 
             libraries.Add(library);
@@ -398,7 +422,8 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
         var walk = new Walk { PageLimit = options.PagesToFollow };
         library.Stream = walk;
 
-        var names = library.Columns.Select(c => c.InternalName).Prepend("FileLeafRef").ToList();
+        var names = library.Columns.Select(c => c.InternalName)
+            .Prepend("FileRef").Prepend("FileLeafRef").ToList();
         var body = Body(names);
         var url = $"{ListUrl(library)}/RenderListDataAsStream";
         string? next = url;
@@ -440,14 +465,19 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
             return;
         }
 
-        var specimen = library.Specimens.FirstOrDefault(s =>
-            string.Equals(s.Leaf, leaf, StringComparison.OrdinalIgnoreCase));
+        foreach (var sharing in library.Specimens.Where(s =>
+                     string.Equals(s.Leaf, leaf, StringComparison.OrdinalIgnoreCase)))
+        {
+            sharing.LeafSeen++;
+        }
 
+        var specimen = Match(library, Text(row, "FileRef"), leaf);
         if (specimen is null)
         {
             return;
         }
 
+        specimen.StreamMatches++;
         specimen.FoundInStream = true;
         specimen.StreamKeys.AddRange(row.EnumerateObject().Select(p => p.Name));
 
@@ -465,6 +495,35 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 specimen.Recorded[column.InternalName] = Short(cell);
             }
         }
+    }
+
+    /// <summary>
+    /// The specimen a row belongs to, decided by the full path rather than by the file name.
+    /// <para>
+    /// A leaf name is not unique inside a library - a folder can hold another file called the same
+    /// thing - and matching on one merges two files into one row of the report without saying so. Run
+    /// 132 did exactly that: a specimen's property bag arrived twice, and only the key count gave it
+    /// away. The path is what the operator named, so it is what the row is matched against.
+    /// </para>
+    /// <para>
+    /// The leaf is still compared as a fallback, but only when no path came back at all - a row with
+    /// no FileRef is a row this run cannot place, and guessing from the name is worse than saying so.
+    /// </para>
+    /// </summary>
+    private static Specimen? Match(Library library, string? fileRef, string leaf)
+    {
+        if (fileRef is not null)
+        {
+            var decoded = Uri.UnescapeDataString(fileRef);
+
+            return library.Specimens.FirstOrDefault(s =>
+                s.FileRef is not null &&
+                (string.Equals(s.FileRef, fileRef, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(s.FileRef, decoded, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return library.Specimens.FirstOrDefault(s =>
+            string.Equals(s.Leaf, leaf, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>The request body. The names are the only thing that varies between runs.</summary>
@@ -537,16 +596,14 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 }
 
                 var leaf = Text(bag, "FileLeafRef");
-                var specimen = leaf is null
-                    ? null
-                    : library.Specimens.FirstOrDefault(s =>
-                        string.Equals(s.Leaf, leaf, StringComparison.OrdinalIgnoreCase));
+                var specimen = leaf is null ? null : Match(library, Text(bag, "FileRef"), leaf);
 
                 if (specimen is null)
                 {
                     continue;
                 }
 
+                specimen.TextMatches++;
                 specimen.FoundInText = true;
                 specimen.TextKeys.AddRange(bag.EnumerateObject().Select(p => p.Name));
                 specimen.MetaInfo = Text(bag, "MetaInfo");
@@ -589,12 +646,13 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
     private static ProbeTable SpecimenTable(IReadOnlyList<Library> libraries) =>
         new("Each specimen, on both routes. 'promoted' is whether the list's own label column carried " +
             "anything; 'label in the file' is what MetaInfo says, which does not depend on the list",
-            ["file", "ext", "library", "promoted", "listing: columns with a value", "label in the file"],
+            ["file", "ext", "rows matched", "promoted", "listing: columns with a value", "label in the file"],
             libraries.SelectMany(l => l.Specimens.Select(s => (IReadOnlyList<string?>)
             [
                 s.Leaf,
                 s.Extension,
-                l.Title,
+                $"{s.StreamMatches} listing / {s.TextMatches} bag" +
+                    (s.LeafSeen > s.StreamMatches ? $" ({s.LeafSeen} share the name)" : string.Empty),
                 !s.FoundInStream ? "(row never returned)" : s.Promoted ? "yes" : "no",
                 !s.FoundInStream
                     ? "-"
@@ -637,19 +695,26 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
     /// </summary>
     private static void Quote(ProbeReport report, Specimen specimen)
     {
-        if (specimen.StreamKeys.Count > 0)
+        Bag(report, specimen, "RenderListDataAsStream", specimen.StreamKeys, specimen.StreamMatches);
+        Bag(report, specimen, "FieldValuesAsText", specimen.TextKeys, specimen.TextMatches);
+    }
+
+    /// <summary>
+    /// One bag, quoted whole. The title carries the distinct count and how many rows contributed it:
+    /// a raw total that is twice the distinct one is not a wide bag, it is two files.
+    /// </summary>
+    private static void Bag(ProbeReport report, Specimen specimen, string route, List<string> keys, int matches)
+    {
+        if (keys.Count == 0)
         {
-            report.Quote(
-                $"{specimen.Leaf} - every key RenderListDataAsStream returned ({specimen.StreamKeys.Count})",
-                string.Join("\n", specimen.StreamKeys.Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal)));
+            return;
         }
 
-        if (specimen.TextKeys.Count > 0)
-        {
-            report.Quote(
-                $"{specimen.Leaf} - every key FieldValuesAsText returned ({specimen.TextKeys.Count})",
-                string.Join("\n", specimen.TextKeys.Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal)));
-        }
+        var distinct = keys.Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal).ToList();
+
+        report.Quote(
+            $"{specimen.Leaf} - every key {route} returned ({distinct.Count} distinct, from {matches} row(s))",
+            string.Join("\n", distinct));
     }
 
     // ---- observations ---------------------------------------------------------------------------
@@ -695,6 +760,11 @@ public sealed class UnpromotedProbe(ProbeOptions options, ProbeHttpClient http, 
                 {
                     ["library"] = specimen.Library,
                     ["extension"] = specimen.Extension,
+                    ["rows matched"] =
+                        $"{specimen.StreamMatches} from the listing, {specimen.TextMatches} from the bag" +
+                        (specimen.LeafSeen > specimen.StreamMatches
+                            ? $"; {specimen.LeafSeen} item(s) in this library share the name"
+                            : string.Empty),
                     ["promoted"] = specimen.FoundInStream ? specimen.Promoted ? "yes" : "no" : "(no row)",
                     ["labelled in its own bytes"] = specimen.FoundInText ? specimen.Labelled ? "yes" : "no" : "(no row)",
                     ["columns telling it from an unlabelled file"] = Join(telling),
