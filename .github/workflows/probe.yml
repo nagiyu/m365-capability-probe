@@ -12,7 +12,7 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo, selected]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo, selected, hidden]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
