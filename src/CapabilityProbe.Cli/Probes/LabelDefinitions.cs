@@ -37,6 +37,26 @@ public static class LabelDefinitions
     ];
 
     /// <summary>
+    /// A <c>User-Agent</c>, sent on every route.
+    /// <para>
+    /// The tool had never sent one, and no endpoint measured before this one had ever asked for it.
+    /// Both beta routes refused the first run with <c>400 invalidRequest</c> and, in the inner error,
+    /// <c>Value cannot be null. (Parameter 'User-Agent')</c>. That is a fact about the request this
+    /// probe built, not about what the identity may read - and reporting it in the same column as a
+    /// refusal would have made the tool's own omission look like the tenant's answer.
+    /// </para>
+    /// <para>
+    /// It goes on all four routes rather than only the two that asked, so the version and the surface
+    /// stay the only things that differ between rows. It is recorded in the request headers, so a
+    /// reader can see it was sent and re-issue the call by hand.
+    /// </para>
+    /// </summary>
+    private static readonly (string Name, string Value)[] Headers =
+    [
+        ("User-Agent", "m365-capability-probe"),
+    ];
+
+    /// <summary>
     /// Walks every route once, quoting what each returned. Returns the table; the quotes go straight
     /// onto the report, because a label definition is exactly the kind of value a cell would clip.
     /// </summary>
@@ -51,7 +71,7 @@ public static class LabelDefinitions
 
         foreach (var (name, url) in Routes)
         {
-            var observation = await caller.GetAsync(url, token, cancellationToken);
+            var observation = await caller.GetAsync(url, token, cancellationToken, extraHeaders: Headers);
             calls.Add(observation);
 
             if (!observation.IsSuccess)
