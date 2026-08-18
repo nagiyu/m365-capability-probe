@@ -85,6 +85,9 @@ public static class Program
                 ProbeOptionsLoader.HiddenCommand =>
                     await RunHiddenAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.UnpromotedCommand =>
+                    await RunUnpromotedAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -160,6 +163,12 @@ public static class Program
     {
         using var http = new ProbeHttpClient();
         return await new HiddenFieldsProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
+    private static async Task<ProbeReport> RunUnpromotedAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new UnpromotedProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
     private static async Task<ProbeReport> RunSelectedAsync(ProbeOptions options, CancellationToken cancellationToken)
@@ -246,6 +255,14 @@ public static class Program
         writer.WriteLine("              run, with an invented name beside them - because 'no such column' means");
         writer.WriteLine("              nothing until an undefined name is refused differently. values are never");
         writer.WriteLine("              recorded; whether one arrived is the whole measurement");
+        writer.WriteLine("  unpromoted  can a label that never reached the list's columns still be read from a");
+        writer.WriteLine("              listing? finding 24 read it out of the document's own bag; finding 30 read");
+        writer.WriteLine("              eight columns out of the listing and every value in them was a promoted");
+        writer.WriteLine("              one. both routes are walked over the same specimens in one run. a path in");
+        writer.WriteLine("              FilePaths may name its library as 'Title::/name.docx' - without a prefix");
+        writer.WriteLine("              it means the default library, and every library the site has is listed");
+        writer.WriteLine("              either way. RowLimit carries Paged=TRUE: without it the view stops at the");
+        writer.WriteLine("              limit offering no continuation, and a short answer reads as a whole one");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");

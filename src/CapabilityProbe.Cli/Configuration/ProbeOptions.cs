@@ -57,9 +57,40 @@ public sealed class ProbeOptions
     /// </summary>
     public string FilePaths { get; set; } = string.Empty;
 
-    /// <summary>The paths, split and trimmed. Empty when none are configured.</summary>
+    /// <summary>
+    /// The paths, split and trimmed, with any library prefix removed. Empty when none are configured.
+    /// </summary>
     public IReadOnlyList<string> Files =>
-        Several(FilePaths);
+        Several(FilePaths).Select(f => Target(f).Path).ToList();
+
+    /// <summary>
+    /// The paths with the library each one names, for the subcommands that look in more than one.
+    /// <para>
+    /// A path may be written <c>&lt;library title&gt;::/name.docx</c>; without a prefix it means the
+    /// site's default library, which is what every path meant before this existed. The separator is
+    /// two colons because SharePoint refuses a colon in a file or folder name, so it can never occur
+    /// inside a path and never needs escaping - the same reason <c>|</c> separates the paths
+    /// themselves.
+    /// </para>
+    /// <para>
+    /// The library rides on the path rather than living in a setting of its own because the dispatch
+    /// form is full: ten inputs is the limit, and it has ten. Attaching it here is also the more
+    /// precise shape - a run that compares two libraries needs each specimen to say which one it is
+    /// in, not a list of libraries beside a list of files.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<(string? Library, string Path)> FileTargets =>
+        Several(FilePaths).Select(Target).ToList();
+
+    /// <summary>Splits one entry into the library it names and the path inside it.</summary>
+    private static (string? Library, string Path) Target(string entry)
+    {
+        var separator = entry.IndexOf("::", StringComparison.Ordinal);
+
+        return separator < 0
+            ? (null, entry)
+            : (entry[..separator].Trim(), entry[(separator + 2)..].Trim());
+    }
 
     /// <summary>
     /// Splits a key that takes several values, on the ASCII pipe or on the full-width one.
@@ -181,6 +212,7 @@ public sealed class ProbeOptions
     /// </para>
     /// </summary>
     public string PageSize { get; set; } = string.Empty;
+
 
     /// <summary>The requested page size, or null when it was not set or was not a positive number.</summary>
     public int? RequestedPageSize =>

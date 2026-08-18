@@ -12,7 +12,7 @@ on:
       subcommand:
         description: "What to measure"
         type: choice
-        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo, selected, hidden]
+        options: [auth, access, sharepoint, acl, mip, consume, inventory, promotion, delta, permissions, metainfo, selected, hidden, unpromoted]
         default: auth
         required: true
       # Not required: 'mip' and 'consume' never touch a site, and a form cannot ask for a value only
@@ -37,7 +37,7 @@ on:
         required: false
         default: ""
       file_paths:
-        description: "FilePaths - access, promotion, permissions and metainfo. Several allowed, separated by '|' (the full-width | is accepted too). No library name. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
+        description: "FilePaths - access, promotion, permissions and metainfo. Several allowed, separated by '|' (the full-width | is accepted too). No library name, except that unpromoted accepts 'Title::/a.docx' to name one. e.g. /a.docx|/sub/b.docx. promotion reads them all in one call sequence, so they are compared at one moment."
         type: string
         required: false
         default: ""
