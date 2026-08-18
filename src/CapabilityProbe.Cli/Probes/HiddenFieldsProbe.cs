@@ -238,8 +238,16 @@ public sealed class HiddenFieldsProbe(ProbeOptions options, ProbeHttpClient http
             Identity = delegated.SignedInSummary,
             SharePointToken = sharePoint.AccessToken,
             GraphToken = graph.AccessToken,
+            // Why the column is empty, in words that cannot be read as an answer about columns. A
+            // delegated leg can come up empty for three unrelated reasons - it was switched off, the
+            // sign-in was refused, or the app holds no delegated grant for SharePoint - and only the
+            // last one is about this registration's reach. Finding 7 is the live one in this tenant:
+            // device code is refused by security defaults, which is a fact about the tenant's sign-in
+            // policy and says nothing whatever about hidden columns.
             Silent = sharePoint.AccessToken is null
-                ? $"no SharePoint token ({TokenReason(sharePoint)})"
+                ? delegated.Enabled
+                    ? $"no SharePoint token ({TokenReason(sharePoint)}); sign-in: {delegated.SignedInSummary}"
+                    : $"not asked - {delegated.SignedInSummary}"
                 : null,
         });
 
