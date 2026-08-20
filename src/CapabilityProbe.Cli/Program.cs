@@ -88,6 +88,9 @@ public static class Program
                 ProbeOptionsLoader.UnpromotedCommand =>
                     await RunUnpromotedAsync(configuration.Options, cancellation.Token),
 
+                ProbeOptionsLoader.FilterCommand =>
+                    await RunFilterAsync(configuration.Options, cancellation.Token),
+
                 _ => throw new InvalidOperationException($"unreachable subcommand '{command}'"),
             };
 
@@ -169,6 +172,12 @@ public static class Program
     {
         using var http = new ProbeHttpClient();
         return await new UnpromotedProbe(options, http, Console.Out).RunAsync(cancellationToken);
+    }
+
+    private static async Task<ProbeReport> RunFilterAsync(ProbeOptions options, CancellationToken cancellationToken)
+    {
+        using var http = new ProbeHttpClient();
+        return await new FilterProbe(options, http, Console.Out).RunAsync(cancellationToken);
     }
 
     private static async Task<ProbeReport> RunSelectedAsync(ProbeOptions options, CancellationToken cancellationToken)
@@ -263,6 +272,13 @@ public static class Program
         writer.WriteLine("              it means the default library, and every library the site has is listed");
         writer.WriteLine("              either way. RowLimit carries Paged=TRUE: without it the view stops at the");
         writer.WriteLine("              limit offering no continuation, and a short answer reads as a whole one");
+        writer.WriteLine("  filter      will the listing route NARROW by a hidden column, not just return it?");
+        writer.WriteLine("              finding 30 put ten hidden columns in ViewFields and eight came back - that");
+        writer.WriteLine("              is a projection, not a filter. four calls, one library, one run: no");
+        writer.WriteLine("              condition, _IpLabelId IsNotNull, a predicate that CANNOT match, and the");
+        writer.WriteLine("              same filter at RowLimit 2. the third is not an extra - if a predicate that");
+        writer.WriteLine("              cannot match still returns every row, then a filtered count agreeing with");
+        writer.WriteLine("              the unfiltered one says nothing at all about the column");
         writer.WriteLine();
         writer.WriteLine("Settings (later layers win): appsettings.json, appsettings.local.json, user-secrets,");
         writer.WriteLine("PROBE_* environment variables, --Key=Value arguments.");
