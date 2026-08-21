@@ -73,11 +73,18 @@ public static class ProbeOptionsLoader
     /// </summary>
     public const string UnpromotedCommand = "unpromoted";
 
+    /// <summary>
+    /// Whether the listing route will narrow a result set by a hidden column, rather than only return
+    /// it. Finding 30 answered the second half. Returning a column costs a whole library's worth of
+    /// rows; filtering on it is what makes a survey affordable, and the two are separate capabilities.
+    /// </summary>
+    public const string FilterCommand = "filter";
+
     public static readonly string[] AllCommands =
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, MipCommand, ConsumeCommand,
         InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-        SelectedCommand, HiddenCommand, UnpromotedCommand,
+        SelectedCommand, HiddenCommand, UnpromotedCommand, FilterCommand,
     ];
 
     /// <summary>Everything that authenticates as the app registration, whatever it then talks to.</summary>
@@ -85,7 +92,7 @@ public static class ProbeOptionsLoader
     [
         AuthCommand, AccessCommand, SharePointCommand, AclCommand, ConsumeCommand, InventoryCommand,
         PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand, SelectedCommand,
-        HiddenCommand, UnpromotedCommand,
+        HiddenCommand, UnpromotedCommand, FilterCommand,
     ];
 
     private static readonly string[] ConsumeOnly = [ConsumeCommand];
@@ -112,14 +119,15 @@ public static class ProbeOptionsLoader
     /// <summary>Everything that speaks as the inventory registration and needs a site to point at.</summary>
     private static readonly string[] SiteReaders =
         [InventoryCommand, PromotionCommand, DeltaCommand, PermissionsCommand, MetaInfoCommand,
-         SelectedCommand, HiddenCommand, UnpromotedCommand];
+         SelectedCommand, HiddenCommand, UnpromotedCommand, FilterCommand];
 
     /// <summary>
     /// <c>promotion</c> takes the same key for the same reason: it is asked about named files, and a
     /// run with none configured has nothing to compare.
     /// </summary>
     private static readonly string[] NeedsFilePaths =
-        [AccessCommand, PromotionCommand, PermissionsCommand, MetaInfoCommand, UnpromotedCommand];
+        [AccessCommand, PromotionCommand, PermissionsCommand, MetaInfoCommand, UnpromotedCommand,
+         FilterCommand];
 
     private static readonly string[] AclOnly = [AclCommand];
 
